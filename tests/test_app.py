@@ -48,6 +48,18 @@ def test_app_core_api_flow(monkeypatch) -> None:
                 "brightness": 5,
                 "contrast": 1.1,
                 "saturation": 1.2,
+                "doll_intensity": 0.9,
+                "porcelain_skin": 0.8,
+                "eye_roundness": 0.7,
+                "eye_liner": 0.6,
+                "lash_emphasis": 0.5,
+                "lower_eyelid": 0.4,
+                "iris_gloss": 0.9,
+                "cheek_gradient": 0.8,
+                "lip_gloss": 0.7,
+                "hair_silk": 0.5,
+                "background_high_key": 0.6,
+                "soft_glow": 0.7,
                 "debug_overlay": "masks",
             },
         )
@@ -55,6 +67,8 @@ def test_app_core_api_flow(monkeypatch) -> None:
         assert effects.json()["brightness"] == 5
         assert effects.json()["processing_profile"] == "fast"
         assert effects.json()["debug_overlay"] == "masks"
+        assert effects.json()["doll_intensity"] == 0.9
+        assert effects.json()["lip_gloss"] == 0.7
 
         performance = client.get("/api/performance")
         assert performance.status_code == 200

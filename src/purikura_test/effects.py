@@ -61,6 +61,13 @@ NOSE = (1, 2, 4, 5, 6, 45, 48, 64, 98, 97, 94, 326, 327, 294, 278, 275, 168, 197
 NOSE_BRIDGE = (6, 168, 197, 195, 5, 4, 1, 2)
 FOREHEAD = (10, 67, 109, 338, 297, 151, 9)
 CHIN = (152, 148, 176, 149, 150, 136, 172, 58, 288, 397, 365, 379, 378, 400, 377)
+LEFT_IRIS = (474, 475, 476, 477)
+RIGHT_IRIS = (469, 470, 471, 472)
+LEFT_UPPER_EYELID = (362, 398, 384, 385, 386, 387, 388, 466, 263)
+LEFT_LOWER_EYELID = (362, 382, 381, 380, 374, 373, 390, 249, 263)
+RIGHT_UPPER_EYELID = (33, 246, 161, 160, 159, 158, 157, 173, 133)
+RIGHT_LOWER_EYELID = (33, 7, 163, 144, 145, 153, 154, 155, 133)
+LIP_INNER = (78, 95, 88, 178, 87, 14, 317, 402, 318, 324, 308, 415, 310, 311, 312, 13, 82, 81, 80, 191)
 DEBUG_LANDMARK_STEP = 12
 
 SEG_BACKGROUND = 0
@@ -116,6 +123,14 @@ class FaceGeometry:
     nose_bridge: np.ndarray
     forehead: np.ndarray
     chin: np.ndarray
+    left_iris: np.ndarray
+    right_iris: np.ndarray
+    left_upper_eyelid: np.ndarray
+    left_lower_eyelid: np.ndarray
+    right_upper_eyelid: np.ndarray
+    right_lower_eyelid: np.ndarray
+    lip_outer: np.ndarray
+    lip_inner: np.ndarray
     landmarks: np.ndarray
 
     @property
@@ -136,6 +151,8 @@ class SegmentationMasks:
     protected: np.ndarray
     face_skin: np.ndarray
     body_skin: np.ndarray
+    background: np.ndarray
+    clothes: np.ndarray
 
 
 @dataclass(frozen=True)
@@ -286,6 +303,8 @@ class HeadSegmenter:
             protected=protected,
             face_skin=masks.face_skin,
             body_skin=masks.body_skin,
+            background=masks.background,
+            clothes=masks.clothes,
         )
 
 
@@ -318,12 +337,19 @@ class QualityEffectPipeline:
         detections = self.tracker.detect(frame_bgr)
         masks = self.segmenter.segment(frame_bgr, detections)
         adjusted = frame_bgr.copy()
-        adjusted = self._apply_face_slim(adjusted, detections, settings.face_slim * settings.purikura_intensity)
-        adjusted = self._enlarge_eyes(adjusted, detections, settings.eye_enlarge * settings.purikura_intensity)
+        profile_strength = settings.purikura_intensity * (1.0 + settings.doll_intensity * 0.18)
+        adjusted = self._apply_face_slim(adjusted, detections, settings.face_slim * profile_strength)
+        adjusted = apply_doll_shape(adjusted, detections, settings)
+        adjusted = self._enlarge_eyes(adjusted, detections, settings.eye_enlarge * profile_strength)
         adjusted = self._apply_purikura_skin(adjusted, settings, detections, masks)
+        adjusted = apply_porcelain_skin(adjusted, settings, masks)
+        adjusted = apply_hair_silk(adjusted, settings, masks)
+        adjusted = apply_background_high_key(adjusted, settings, masks)
         adjusted = self._apply_part_refinements(adjusted, settings, detections, masks)
         adjusted = self._apply_makeup(adjusted, settings, detections)
+        adjusted = apply_doll_makeup(adjusted, detections, settings)
         adjusted = self._apply_purikura_tone(adjusted, settings)
+        adjusted = apply_soft_glow(adjusted, settings)
         framed = adjusted if frame_asset is None else alpha_composite_bgra(adjusted, frame_asset.image_bgra)
         return draw_debug_overlay(framed, detections, masks, settings.debug_overlay)
 
@@ -336,7 +362,8 @@ class QualityEffectPipeline:
     ) -> np.ndarray:
         intensity = settings.purikura_intensity
         smoothing = settings.skin_smoothing
-        whitening = settings.skin_whitening
+        doll = settings.doll_intensity
+        whitening = np.clip(settings.skin_whitening + settings.porcelain_skin * doll * 0.24, 0.0, 1.0)
 
         skin_mask = np.clip(masks.skin * (1.0 - masks.protected), 0.0, 1.0)
         hair_mask = np.clip(masks.hair * (1.0 - masks.skin) * face_proximity_mask(frame_bgr.shape, detections), 0.0, 1.0)
@@ -359,7 +386,7 @@ class QualityEffectPipeline:
         lab[:, :, 1] = np.clip(lab[:, :, 1] + 3.0 * intensity, 0, 255)
         whitening_target = cv2.cvtColor(lab.astype(np.uint8), cv2.COLOR_LAB2BGR)
 
-        skin_strength = np.clip(skin_mask * (0.70 * smoothing + 0.36 * intensity + 0.30 * whitening), 0, 0.96)
+        skin_strength = np.clip(skin_mask * (0.70 * smoothing + 0.36 * intensity + 0.30 * whitening + 0.22 * settings.porcelain_skin * doll), 0, 0.98)
         result = blend_by_mask(frame_bgr, whitening_target, skin_strength)
 
         if float(np.max(hair_mask)) > 0.01:
@@ -508,10 +535,16 @@ class FastEffectPipeline:
         masks = self.segmenter.segment(working, detections)
 
         adjusted = working.copy()
-        adjusted = QualityEffectPipeline._apply_face_slim(adjusted, detections, settings.face_slim * settings.purikura_intensity * 0.82)
-        adjusted = QualityEffectPipeline._enlarge_eyes(adjusted, detections, settings.eye_enlarge * settings.purikura_intensity * 0.9)
+        profile_strength = settings.purikura_intensity * (1.0 + settings.doll_intensity * 0.14)
+        adjusted = QualityEffectPipeline._apply_face_slim(adjusted, detections, settings.face_slim * profile_strength * 0.82)
+        adjusted = apply_doll_shape(adjusted, detections, settings, fast=True)
+        adjusted = QualityEffectPipeline._enlarge_eyes(adjusted, detections, settings.eye_enlarge * profile_strength * 0.9)
         adjusted = self._apply_fast_beauty(adjusted, settings, detections, masks)
+        adjusted = apply_hair_silk(adjusted, settings, masks, fast=True)
+        adjusted = apply_background_high_key(adjusted, settings, masks, fast=True)
+        adjusted = apply_doll_makeup(adjusted, detections, settings, fast=True)
         adjusted = self._apply_fast_tone(adjusted, settings)
+        adjusted = apply_soft_glow(adjusted, settings, fast=True)
         if settings.debug_overlay != "off":
             adjusted = draw_debug_overlay(adjusted, detections, masks, settings.debug_overlay)
 
@@ -537,6 +570,7 @@ class FastEffectPipeline:
             return result
 
         intensity = settings.purikura_intensity
+        doll = settings.doll_intensity
         skin = np.clip(masks.skin[y1:y2, x1:x2] * (1.0 - masks.protected[y1:y2, x1:x2]), 0.0, 1.0)
         hair = np.clip(masks.hair[y1:y2, x1:x2] * (1.0 - masks.skin[y1:y2, x1:x2]), 0.0, 1.0)
         if float(np.max(skin)) <= 0.01 and float(np.max(hair)) <= 0.01:
@@ -550,9 +584,10 @@ class FastEffectPipeline:
 
         ivory = np.full_like(base, (226, 232, 255))
         pink = np.full_like(base, (208, 212, 255))
-        skin_target = cv2.addWeighted(smooth, 1.0 - 0.26 * settings.skin_whitening, ivory, 0.26 * settings.skin_whitening, 12 * settings.skin_whitening)
+        whitening = np.clip(settings.skin_whitening + settings.porcelain_skin * doll * 0.22, 0.0, 1.0)
+        skin_target = cv2.addWeighted(smooth, 1.0 - 0.26 * whitening, ivory, 0.26 * whitening, 12 * whitening)
         skin_target = cv2.addWeighted(skin_target, 1.0 - 0.08 * intensity, pink, 0.08 * intensity, 0)
-        skin_strength = np.clip(skin * (0.62 * settings.skin_smoothing + 0.34 * settings.skin_whitening + 0.24 * intensity), 0.0, 0.88)
+        skin_strength = np.clip(skin * (0.62 * settings.skin_smoothing + 0.34 * whitening + 0.24 * intensity + 0.18 * settings.porcelain_skin * doll), 0.0, 0.92)
         blended = blend_by_mask(base, skin_target, skin_strength)
 
         part_masks = build_part_masks(frame_bgr.shape, detections)
@@ -709,6 +744,14 @@ def face_geometry_from_points(points: np.ndarray, image_shape: tuple[int, ...]) 
         nose_bridge=points_for_indices(points, NOSE_BRIDGE).astype(np.int32),
         forehead=points_for_indices(points, FOREHEAD).astype(np.int32),
         chin=points_for_indices(points, CHIN).astype(np.int32),
+        left_iris=points_for_indices(points, LEFT_IRIS).astype(np.int32),
+        right_iris=points_for_indices(points, RIGHT_IRIS).astype(np.int32),
+        left_upper_eyelid=points_for_indices(points, LEFT_UPPER_EYELID).astype(np.int32),
+        left_lower_eyelid=points_for_indices(points, LEFT_LOWER_EYELID).astype(np.int32),
+        right_upper_eyelid=points_for_indices(points, RIGHT_UPPER_EYELID).astype(np.int32),
+        right_lower_eyelid=points_for_indices(points, RIGHT_LOWER_EYELID).astype(np.int32),
+        lip_outer=points_for_indices(points, LIPS).astype(np.int32),
+        lip_inner=points_for_indices(points, LIP_INNER).astype(np.int32),
         landmarks=points.astype(np.int32),
     )
 
@@ -741,6 +784,20 @@ def face_geometry_from_box(box: DetectionBox, image_shape: tuple[int, ...]) -> F
         points[index] = [x + w * (0.5 + offset), y + h * 0.18]
     for index, offset in zip(CHIN, np.linspace(-0.22, 0.22, len(CHIN))):
         points[index] = [x + w * (0.5 + offset), y + h * 0.86]
+    for index, angle in zip(LEFT_IRIS, np.linspace(0, np.pi * 2, len(LEFT_IRIS), endpoint=False)):
+        points[index] = [x + w * 0.66 + np.cos(angle) * w * 0.035, y + h * 0.42 + np.sin(angle) * h * 0.025]
+    for index, angle in zip(RIGHT_IRIS, np.linspace(0, np.pi * 2, len(RIGHT_IRIS), endpoint=False)):
+        points[index] = [x + w * 0.34 + np.cos(angle) * w * 0.035, y + h * 0.42 + np.sin(angle) * h * 0.025]
+    for index, offset in zip(LEFT_UPPER_EYELID, np.linspace(-0.09, 0.09, len(LEFT_UPPER_EYELID))):
+        points[index] = [x + w * (0.66 + offset), y + h * 0.375]
+    for index, offset in zip(LEFT_LOWER_EYELID, np.linspace(-0.09, 0.09, len(LEFT_LOWER_EYELID))):
+        points[index] = [x + w * (0.66 + offset), y + h * 0.465]
+    for index, offset in zip(RIGHT_UPPER_EYELID, np.linspace(-0.09, 0.09, len(RIGHT_UPPER_EYELID))):
+        points[index] = [x + w * (0.34 + offset), y + h * 0.375]
+    for index, offset in zip(RIGHT_LOWER_EYELID, np.linspace(-0.09, 0.09, len(RIGHT_LOWER_EYELID))):
+        points[index] = [x + w * (0.34 + offset), y + h * 0.465]
+    for index, angle in zip(LIP_INNER, np.linspace(0, np.pi * 2, len(LIP_INNER), endpoint=False)):
+        points[index] = [x + w * 0.5 + np.cos(angle) * w * 0.09, y + h * 0.72 + np.sin(angle) * h * 0.035]
     return face_geometry_from_points(points, image_shape)
 
 
@@ -776,6 +833,8 @@ def empty_masks(image_shape: tuple[int, ...]) -> SegmentationMasks:
         protected=zero.copy(),
         face_skin=zero.copy(),
         body_skin=zero.copy(),
+        background=zero.copy(),
+        clothes=zero.copy(),
     )
 
 
@@ -787,9 +846,11 @@ def masks_from_segmenter_result(
     face_skin = confidence_or_category_mask(result, SEG_FACE_SKIN, image_shape)
     body_skin = confidence_or_category_mask(result, SEG_BODY_SKIN, image_shape)
     hair = confidence_or_category_mask(result, SEG_HAIR, image_shape)
+    background = confidence_or_category_mask(result, SEG_BACKGROUND, image_shape)
+    clothes = confidence_or_category_mask(result, SEG_CLOTHES, image_shape)
     proximity = face_proximity_mask(image_shape, detections)
     if detections.faces:
-        body_skin_near = body_skin * proximity
+        body_skin_near = np.maximum(body_skin * proximity, body_skin * 0.35)
         hair_near = hair * proximity
     else:
         body_skin_near = body_skin
@@ -798,6 +859,8 @@ def masks_from_segmenter_result(
     face_skin = smooth_mask(face_skin, sigma=2.0)
     body_skin_near = smooth_mask(body_skin_near, sigma=2.5)
     hair_near = smooth_mask(hair_near, sigma=2.5)
+    background = smooth_mask(background, sigma=1.5)
+    clothes = smooth_mask(clothes, sigma=1.5)
     protected = build_part_masks(image_shape, detections).protected
     skin = np.clip(np.maximum(face_skin, body_skin_near), 0.0, 1.0)
     head = np.clip(np.maximum(skin, hair_near), 0.0, 1.0)
@@ -809,6 +872,8 @@ def masks_from_segmenter_result(
         protected=protected,
         face_skin=face_skin,
         body_skin=body_skin_near,
+        background=background,
+        clothes=clothes,
     )
 
 
@@ -844,6 +909,8 @@ def ema_masks(previous: SegmentationMasks, current: SegmentationMasks, alpha: fl
         protected=current.protected,
         face_skin=mix(previous.face_skin, current.face_skin),
         body_skin=mix(previous.body_skin, current.body_skin),
+        background=mix(previous.background, current.background),
+        clothes=mix(previous.clothes, current.clothes),
     )
 
 
@@ -1026,6 +1093,358 @@ def apply_eye_sparkle(frame_bgr: np.ndarray, face: FaceGeometry, strength: float
     return cv2.addWeighted(frame_bgr, 1.0 - min(0.7, strength), result, min(0.7, strength), 0)
 
 
+def apply_doll_shape(
+    frame_bgr: np.ndarray,
+    detections: FaceDetections,
+    settings: EffectSettings,
+    *,
+    fast: bool = False,
+) -> np.ndarray:
+    doll = settings.doll_intensity
+    if doll <= 0 or not detections.faces:
+        return frame_bgr
+
+    result = frame_bgr.copy()
+    round_strength = settings.eye_roundness * doll * (0.44 if fast else 0.54)
+    slim_strength = doll * (0.10 + 0.28 * settings.face_slim)
+    for face in detections.faces:
+        if round_strength > 0:
+            for eye in face.eyes:
+                result = local_eye_round(result, eye, min(0.42, round_strength))
+        if slim_strength > 0:
+            cx, _ = face.bbox.center
+            left_center = point_center(face.left_cheek)
+            right_center = point_center(face.right_cheek)
+            lower_y = face.bbox.y + face.bbox.height * 0.66
+            radius = max(face.bbox.width, face.bbox.height) * (0.26 if fast else 0.30)
+            result = local_translate(
+                result,
+                (left_center[0], max(left_center[1], lower_y)),
+                (face.bbox.width * 0.052 * slim_strength, -face.bbox.height * 0.012 * slim_strength),
+                radius,
+            )
+            result = local_translate(
+                result,
+                (right_center[0], max(right_center[1], lower_y)),
+                (-face.bbox.width * 0.052 * slim_strength, -face.bbox.height * 0.012 * slim_strength),
+                radius,
+            )
+            result = local_translate(
+                result,
+                (cx, face.bbox.y + face.bbox.height * 0.88),
+                (0, -face.bbox.height * 0.050 * slim_strength),
+                radius * 0.78,
+            )
+    return result
+
+
+def apply_porcelain_skin(
+    frame_bgr: np.ndarray,
+    settings: EffectSettings,
+    masks: SegmentationMasks,
+) -> np.ndarray:
+    strength = settings.porcelain_skin * settings.doll_intensity
+    if strength <= 0:
+        return frame_bgr
+
+    skin_mask = np.clip(masks.skin * (1.0 - masks.protected), 0.0, 1.0)
+    if float(np.max(skin_mask)) <= 0.01:
+        return frame_bgr
+
+    lab = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
+    local_l = cv2.GaussianBlur(lab[:, :, 0], (0, 0), sigmaX=7.5, sigmaY=7.5)
+    skin = skin_mask[:, :, None]
+    lab[:, :, 0] = np.clip(
+        lab[:, :, 0] * (1.0 - skin_mask * 0.30 * strength)
+        + local_l * (skin_mask * 0.30 * strength)
+        + skin_mask * (14 + 12 * settings.skin_whitening) * strength,
+        0,
+        255,
+    )
+    lab[:, :, 1] = np.clip(lab[:, :, 1] * (1.0 - skin_mask * 0.16 * strength) + 136 * (skin_mask * 0.16 * strength), 0, 255)
+    lab[:, :, 2] = np.clip(lab[:, :, 2] * (1.0 - skin_mask * 0.12 * strength) + 126 * (skin_mask * 0.12 * strength), 0, 255)
+    target = cv2.cvtColor(lab.astype(np.uint8), cv2.COLOR_LAB2BGR)
+    porcelain = np.full_like(frame_bgr, (226, 230, 255))
+    target = cv2.addWeighted(target, 1.0 - 0.18 * strength, porcelain, 0.18 * strength, 4 * strength)
+    return blend_by_mask(frame_bgr, target, np.clip(skin * (0.26 + 0.40 * strength), 0.0, 0.78))
+
+
+def apply_hair_silk(
+    frame_bgr: np.ndarray,
+    settings: EffectSettings,
+    masks: SegmentationMasks,
+    *,
+    fast: bool = False,
+) -> np.ndarray:
+    strength = settings.hair_silk * settings.doll_intensity
+    if strength <= 0:
+        return frame_bgr
+
+    hair_mask = np.clip(masks.hair * (1.0 - masks.skin * 0.65), 0.0, 1.0)
+    if float(np.max(hair_mask)) <= 0.01:
+        return frame_bgr
+
+    if fast:
+        smooth = cv2.GaussianBlur(frame_bgr, (0, 0), sigmaX=1.2, sigmaY=1.2)
+    else:
+        smooth = cv2.bilateralFilter(frame_bgr, 9, 70, 70)
+    lab = cv2.cvtColor(smooth, cv2.COLOR_BGR2LAB).astype(np.float32)
+    lab[:, :, 0] = np.clip(lab[:, :, 0] + 10 * strength, 0, 255)
+    silky = cv2.cvtColor(lab.astype(np.uint8), cv2.COLOR_LAB2BGR)
+    cool_pink = np.full_like(frame_bgr, (214, 208, 230))
+    silky = cv2.addWeighted(silky, 1.0 - 0.08 * strength, cool_pink, 0.08 * strength, 0)
+    mask = smooth_mask(hair_mask, sigma=2.0 if not fast else 1.2)
+    return blend_by_mask(frame_bgr, silky, np.clip(mask * (0.18 + 0.28 * strength), 0.0, 0.46))
+
+
+def apply_background_high_key(
+    frame_bgr: np.ndarray,
+    settings: EffectSettings,
+    masks: SegmentationMasks,
+    *,
+    fast: bool = False,
+) -> np.ndarray:
+    strength = settings.background_high_key * settings.doll_intensity
+    if strength <= 0:
+        return frame_bgr
+
+    background_mask = np.clip(masks.background * (1.0 - masks.head * 0.35), 0.0, 1.0)
+    if float(np.max(background_mask)) <= 0.01:
+        return frame_bgr
+
+    sigma = 2.2 if not fast else 1.2
+    background_mask = smooth_mask(background_mask, sigma=sigma)
+    target = np.full_like(frame_bgr, (248, 244, 255))
+    lifted = cv2.addWeighted(frame_bgr, 0.48, target, 0.52, 14 * strength)
+    return blend_by_mask(frame_bgr, lifted, np.clip(background_mask * (0.18 + 0.60 * strength), 0.0, 0.78))
+
+
+def apply_doll_makeup(
+    frame_bgr: np.ndarray,
+    detections: FaceDetections,
+    settings: EffectSettings,
+    *,
+    fast: bool = False,
+) -> np.ndarray:
+    if settings.doll_intensity <= 0 or not detections.faces:
+        return frame_bgr
+
+    result = frame_bgr.copy()
+    for face in detections.faces:
+        result = apply_doll_eye_makeup(result, face, settings, fast=fast)
+        result = apply_doll_cheek_gradient(result, face, settings, fast=fast)
+        result = apply_doll_lip_gloss(result, face, settings, fast=fast)
+    return result
+
+
+def apply_doll_eye_makeup(
+    frame_bgr: np.ndarray,
+    face: FaceGeometry,
+    settings: EffectSettings,
+    *,
+    fast: bool = False,
+) -> np.ndarray:
+    doll = settings.doll_intensity
+    if doll <= 0:
+        return frame_bgr
+
+    result = frame_bgr.copy()
+    line_thickness = max(1, int(face.bbox.width * (0.010 if fast else 0.014)))
+    liner_strength = min(0.70, settings.eye_liner * doll * (0.58 if fast else 0.76))
+    if liner_strength > 0:
+        upper_curves = (face.left_upper_eyelid, face.right_upper_eyelid)
+        lower_curves = (face.left_lower_eyelid, face.right_lower_eyelid)
+        result = blend_curve_color(result, upper_curves, (40, 34, 42), line_thickness + 1, liner_strength, blur_sigma=0.9)
+        result = blend_curve_color(result, lower_curves, (58, 48, 62), line_thickness, liner_strength * 0.42, blur_sigma=0.8)
+
+    lash_strength = min(0.66, settings.lash_emphasis * doll * (0.55 if fast else 0.78))
+    if lash_strength > 0:
+        result = blend_lashes(result, face, lash_strength, fast=fast)
+
+    lower_strength = min(0.68, settings.lower_eyelid * doll * (0.55 if fast else 0.78))
+    if lower_strength > 0:
+        result = blend_lower_eyelid(result, face, lower_strength)
+
+    gloss_strength = min(0.78, settings.iris_gloss * doll * (0.70 if fast else 0.92))
+    if gloss_strength > 0:
+        result = blend_iris_gloss(result, face, gloss_strength)
+
+    return result
+
+
+def apply_doll_cheek_gradient(
+    frame_bgr: np.ndarray,
+    face: FaceGeometry,
+    settings: EffectSettings,
+    *,
+    fast: bool = False,
+) -> np.ndarray:
+    strength = settings.cheek_gradient * settings.doll_intensity
+    if strength <= 0:
+        return frame_bgr
+
+    mask = np.zeros(frame_bgr.shape[:2], dtype=np.uint8)
+    axes = (
+        max(6, int(face.bbox.width * (0.18 if not fast else 0.15))),
+        max(5, int(face.bbox.height * (0.105 if not fast else 0.090))),
+    )
+    for cheek in (face.left_cheek, face.right_cheek):
+        center = tuple(map(int, point_center(cheek)))
+        cv2.ellipse(mask, center, axes, 0, 0, 360, 255, -1, lineType=cv2.LINE_AA)
+    gradient = cv2.GaussianBlur(mask.astype(np.float32) / 255.0, (0, 0), sigmaX=max(3, face.bbox.width * 0.040))
+    pink = np.full_like(frame_bgr, (164, 130, 255))
+    target = cv2.addWeighted(frame_bgr, 0.62, pink, 0.38, 0)
+    return blend_by_mask(frame_bgr, target, np.clip(gradient * (0.16 + 0.36 * strength), 0.0, 0.48))
+
+
+def apply_doll_lip_gloss(
+    frame_bgr: np.ndarray,
+    face: FaceGeometry,
+    settings: EffectSettings,
+    *,
+    fast: bool = False,
+) -> np.ndarray:
+    strength = settings.lip_gloss * settings.doll_intensity
+    if strength <= 0:
+        return frame_bgr
+
+    lip_mask = polygon_mask(frame_bgr.shape, face.lip_outer, blur_sigma=1.6 if not fast else 1.0)
+    if float(np.max(lip_mask)) <= 0.01:
+        lip_mask = np.zeros(frame_bgr.shape[:2], dtype=np.uint8)
+        cv2.ellipse(lip_mask, ellipse_from_box(expand_box(face.lips, frame_bgr.shape, scale_x=1.22, scale_y=1.35)), 255, -1)
+        lip_mask = cv2.GaussianBlur(lip_mask.astype(np.float32) / 255.0, (0, 0), sigmaX=2.0)
+
+    pink_red = np.full_like(frame_bgr, (106, 42, 230))
+    target = cv2.addWeighted(frame_bgr, 0.38, pink_red, 0.62, 0)
+    result = blend_by_mask(frame_bgr, target, np.clip(lip_mask * (0.20 + 0.42 * strength), 0.0, 0.62))
+
+    highlight = np.zeros(frame_bgr.shape[:2], dtype=np.uint8)
+    x1 = int(face.lips.x + face.lips.width * 0.26)
+    x2 = int(face.lips.x + face.lips.width * 0.74)
+    y = int(face.lips.y + face.lips.height * 0.42)
+    cv2.line(highlight, (x1, y), (x2, y), 255, max(1, face.bbox.width // 90), lineType=cv2.LINE_AA)
+    highlight = cv2.GaussianBlur(highlight.astype(np.float32) / 255.0, (0, 0), sigmaX=1.2)
+    shine = cv2.addWeighted(result, 0.72, np.full_like(result, (238, 220, 255)), 0.28, 6)
+    return blend_by_mask(result, shine, np.clip(highlight * strength * 0.55, 0.0, 0.42))
+
+
+def apply_soft_glow(
+    frame_bgr: np.ndarray,
+    settings: EffectSettings,
+    *,
+    fast: bool = False,
+) -> np.ndarray:
+    strength = settings.soft_glow * settings.doll_intensity
+    if strength <= 0:
+        return frame_bgr
+
+    height, width = frame_bgr.shape[:2]
+    target_width = min(width, 360 if fast else 520)
+    if width > target_width:
+        small_height = max(1, int(height * target_width / width))
+        small = cv2.resize(frame_bgr, (target_width, small_height), interpolation=cv2.INTER_AREA)
+    else:
+        small = frame_bgr
+    blur = cv2.GaussianBlur(small, (0, 0), sigmaX=8.0 if fast else 12.0, sigmaY=8.0 if fast else 12.0)
+    if blur.shape[:2] != (height, width):
+        blur = cv2.resize(blur, (width, height), interpolation=cv2.INTER_LINEAR)
+
+    screen = screen_blend(frame_bgr, blur)
+    white = np.full_like(frame_bgr, (246, 242, 255))
+    hazy = cv2.addWeighted(screen, 1.0 - 0.18 * strength, white, 0.18 * strength, 4 * strength)
+    value = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)[:, :, 2].astype(np.float32) / 255.0
+    bright_mask = smooth_mask(np.clip((value - 0.48) / 0.42, 0.0, 1.0), sigma=3.0 if not fast else 1.8)
+    glow_mask = np.clip((0.28 + bright_mask * 0.72) * strength * (0.30 if fast else 0.40), 0.0, 0.48)
+    return blend_by_mask(frame_bgr, hazy, glow_mask)
+
+
+def blend_curve_color(
+    frame_bgr: np.ndarray,
+    curves: tuple[np.ndarray, ...],
+    color: tuple[int, int, int],
+    thickness: int,
+    strength: float,
+    *,
+    blur_sigma: float,
+) -> np.ndarray:
+    if strength <= 0:
+        return frame_bgr
+    mask = np.zeros(frame_bgr.shape[:2], dtype=np.uint8)
+    for curve in curves:
+        if len(curve) >= 2:
+            cv2.polylines(mask, [curve.astype(np.int32)], False, 255, max(1, thickness), lineType=cv2.LINE_AA)
+    if int(cv2.countNonZero(mask)) == 0:
+        return frame_bgr
+    soft = cv2.GaussianBlur(mask.astype(np.float32) / 255.0, (0, 0), sigmaX=blur_sigma)
+    return blend_by_mask(frame_bgr, np.full_like(frame_bgr, color), np.clip(soft * strength, 0.0, 0.86))
+
+
+def blend_lashes(frame_bgr: np.ndarray, face: FaceGeometry, strength: float, *, fast: bool) -> np.ndarray:
+    mask = np.zeros(frame_bgr.shape[:2], dtype=np.uint8)
+    center_x = face.bbox.center[0]
+    length = max(3, int(face.bbox.height * (0.040 if not fast else 0.032)))
+    for curve in (face.left_upper_eyelid, face.right_upper_eyelid):
+        if len(curve) < 3:
+            continue
+        for point in curve[1:-1:2]:
+            outward = -1 if point[0] < center_x else 1
+            end = (int(point[0] + outward * length * 0.42), int(point[1] - length))
+            cv2.line(mask, tuple(point.astype(int)), end, 255, max(1, face.bbox.width // 120), lineType=cv2.LINE_AA)
+    if int(cv2.countNonZero(mask)) == 0:
+        return frame_bgr
+    soft = cv2.GaussianBlur(mask.astype(np.float32) / 255.0, (0, 0), sigmaX=0.75)
+    return blend_by_mask(frame_bgr, np.full_like(frame_bgr, (36, 30, 38)), np.clip(soft * strength, 0.0, 0.72))
+
+
+def blend_lower_eyelid(frame_bgr: np.ndarray, face: FaceGeometry, strength: float) -> np.ndarray:
+    result = frame_bgr.copy()
+    offset = max(2, int(face.bbox.height * 0.024))
+    lower_curves = (
+        shift_points(face.left_lower_eyelid, 0, offset),
+        shift_points(face.right_lower_eyelid, 0, offset),
+    )
+    shadow_curves = (
+        shift_points(face.left_lower_eyelid, 0, int(offset * 2.1)),
+        shift_points(face.right_lower_eyelid, 0, int(offset * 2.1)),
+    )
+    thickness = max(1, face.bbox.width // 95)
+    result = blend_curve_color(result, lower_curves, (238, 224, 255), thickness + 1, strength * 0.54, blur_sigma=1.2)
+    result = blend_curve_color(result, shadow_curves, (96, 72, 118), thickness, strength * 0.22, blur_sigma=1.4)
+    return result
+
+
+def blend_iris_gloss(frame_bgr: np.ndarray, face: FaceGeometry, strength: float) -> np.ndarray:
+    result = frame_bgr.copy()
+    overlay = result.copy()
+    for iris, eye in ((face.left_iris, face.left_eye), (face.right_iris, face.right_eye)):
+        center = point_center(iris) if len(iris) >= 2 else eye.center
+        if len(iris) >= 2:
+            radius = max(2, int(np.mean(np.linalg.norm(iris.astype(np.float32) - np.array(center, dtype=np.float32), axis=1)) * 1.22))
+        else:
+            radius = max(2, int(min(eye.width, eye.height) * 0.18))
+        c = (int(center[0]), int(center[1]))
+        cv2.circle(overlay, c, radius, (174, 142, 116), 1, lineType=cv2.LINE_AA)
+        cv2.circle(overlay, (int(center[0] - radius * 0.32), int(center[1] - radius * 0.36)), max(1, radius // 3), (255, 255, 255), -1, lineType=cv2.LINE_AA)
+        cv2.circle(overlay, (int(center[0] + radius * 0.34), int(center[1] + radius * 0.20)), max(1, radius // 5), (236, 238, 255), -1, lineType=cv2.LINE_AA)
+    return cv2.addWeighted(result, 1.0 - min(0.58, strength), overlay, min(0.58, strength), 0)
+
+
+def shift_points(points: np.ndarray, dx: int, dy: int) -> np.ndarray:
+    if points.size == 0:
+        return points
+    shifted = points.astype(np.int32).copy()
+    shifted[:, 0] += dx
+    shifted[:, 1] += dy
+    return shifted
+
+
+def screen_blend(base_bgr: np.ndarray, overlay_bgr: np.ndarray) -> np.ndarray:
+    base = base_bgr.astype(np.float32) / 255.0
+    overlay = overlay_bgr.astype(np.float32) / 255.0
+    screened = 1.0 - (1.0 - base) * (1.0 - overlay)
+    return np.clip(screened * 255.0, 0, 255).astype(np.uint8)
+
+
 def expand_box(box: DetectionBox, image_shape: tuple[int, ...], *, scale_x: float, scale_y: float) -> DetectionBox:
     center_x = box.x + box.width / 2
     center_y = box.y + box.height / 2
@@ -1055,6 +1474,34 @@ def blend_by_mask(base_bgr: np.ndarray, overlay_bgr: np.ndarray, mask: np.ndarra
         mask = mask[:, :, None]
     blended = base_bgr.astype(np.float32) * (1.0 - mask) + overlay_bgr.astype(np.float32) * mask
     return np.clip(blended, 0, 255).astype(np.uint8)
+
+
+def local_eye_round(frame_bgr: np.ndarray, box: DetectionBox, strength: float) -> np.ndarray:
+    if strength <= 0:
+        return frame_bgr
+    expanded = expand_box(box, frame_bgr.shape, scale_x=2.18, scale_y=2.55)
+    roi = frame_bgr[expanded.y : expanded.y + expanded.height, expanded.x : expanded.x + expanded.width]
+    if roi.size == 0:
+        return frame_bgr
+
+    height, width = roi.shape[:2]
+    grid_x, grid_y = np.meshgrid(np.arange(width, dtype=np.float32), np.arange(height, dtype=np.float32))
+    center_x = width / 2
+    center_y = height / 2
+    radius_x = max(1.0, width * 0.45)
+    radius_y = max(1.0, height * 0.44)
+    dx = grid_x - center_x
+    dy = grid_y - center_y
+    distance = np.sqrt((dx / radius_x) ** 2 + (dy / radius_y) ** 2)
+    influence = np.clip(1.0 - distance, 0.0, 1.0) ** 2
+    zoom_x = 1.0 + strength * 0.42 * influence
+    zoom_y = 1.0 + strength * 1.18 * influence
+    map_x = center_x + dx / zoom_x
+    map_y = center_y + dy / zoom_y
+    warped = cv2.remap(roi, map_x.astype(np.float32), map_y.astype(np.float32), interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT_101)
+    result = frame_bgr.copy()
+    result[expanded.y : expanded.y + expanded.height, expanded.x : expanded.x + expanded.width] = blend_by_mask(roi, warped, influence[:, :, None] * 0.90)
+    return result
 
 
 def local_zoom(
@@ -1144,9 +1591,11 @@ def draw_detection_debug(frame_bgr: np.ndarray, detections: FaceDetections) -> n
 def draw_mask_debug(frame_bgr: np.ndarray, masks: SegmentationMasks) -> np.ndarray:
     result = frame_bgr.copy()
     overlays = (
+        (masks.background, (255, 255, 255), 0.18),
         (masks.head, (0, 220, 255), 0.25),
         (masks.skin, (0, 255, 80), 0.32),
         (masks.hair, (255, 120, 0), 0.24),
+        (masks.clothes, (255, 80, 80), 0.20),
         (masks.protected, (255, 0, 255), 0.45),
     )
     for mask, color, strength in overlays:

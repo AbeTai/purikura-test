@@ -29,6 +29,18 @@ class EffectSettings(BaseModel):
     brightness: int = Field(default=8, ge=-80, le=80)
     contrast: float = Field(default=0.94, ge=0.5, le=2.0)
     saturation: float = Field(default=1.08, ge=0.0, le=2.0)
+    doll_intensity: float = Field(default=0.65, ge=0.0, le=1.0)
+    porcelain_skin: float = Field(default=0.72, ge=0.0, le=1.0)
+    eye_roundness: float = Field(default=0.55, ge=0.0, le=1.0)
+    eye_liner: float = Field(default=0.55, ge=0.0, le=1.0)
+    lash_emphasis: float = Field(default=0.45, ge=0.0, le=1.0)
+    lower_eyelid: float = Field(default=0.50, ge=0.0, le=1.0)
+    iris_gloss: float = Field(default=0.60, ge=0.0, le=1.0)
+    cheek_gradient: float = Field(default=0.50, ge=0.0, le=1.0)
+    lip_gloss: float = Field(default=0.55, ge=0.0, le=1.0)
+    hair_silk: float = Field(default=0.35, ge=0.0, le=1.0)
+    background_high_key: float = Field(default=0.35, ge=0.0, le=1.0)
+    soft_glow: float = Field(default=0.45, ge=0.0, le=1.0)
     debug_overlay: Literal["off", "landmarks", "masks", "parts", "all"] = "off"
 
 

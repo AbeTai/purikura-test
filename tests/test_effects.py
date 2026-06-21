@@ -16,6 +16,11 @@ from purikura_test.effects import (
     RIGHT_EYE,
     SegmentationMasks,
     alpha_composite_bgra,
+    apply_background_high_key,
+    apply_doll_eye_makeup,
+    apply_doll_lip_gloss,
+    apply_porcelain_skin,
+    apply_soft_glow,
     build_face_skin_mask,
     build_part_masks,
     CachedFaceTracker,
@@ -25,6 +30,7 @@ from purikura_test.effects import (
     face_geometry_from_box,
     face_geometry_from_normalized_landmarks,
     head_roi,
+    local_eye_round,
     local_translate,
     local_zoom,
     masks_from_segmenter_result,
@@ -85,9 +91,13 @@ def synthetic_masks(image_shape: tuple[int, int, int], detections: FaceDetection
     face_skin = np.zeros((height, width), dtype=np.float32)
     body_skin = np.zeros((height, width), dtype=np.float32)
     hair = np.zeros((height, width), dtype=np.float32)
+    clothes = np.zeros((height, width), dtype=np.float32)
+    background = np.ones((height, width), dtype=np.float32)
     cv2_like_ellipse(face_skin, (width // 2, int(height * 0.48)), (width // 3, height // 3), 1.0)
     body_skin[int(height * 0.38) : int(height * 0.82), width // 8 : width - width // 8] = 0.85
     hair[int(height * 0.10) : int(height * 0.32), width // 5 : width - width // 5] = 0.9
+    clothes[int(height * 0.74) :, width // 9 : width - width // 9] = 0.8
+    background = np.clip(background - np.maximum.reduce((face_skin, body_skin, hair, clothes)), 0.0, 1.0)
     protected = build_part_masks(image_shape, detections or FaceDetections(faces=())).protected
     skin = np.maximum(face_skin, body_skin)
     head = np.maximum(skin, hair)
@@ -98,6 +108,8 @@ def synthetic_masks(image_shape: tuple[int, int, int], detections: FaceDetection
         protected=protected,
         face_skin=face_skin,
         body_skin=body_skin,
+        background=background,
+        clothes=clothes,
     )
 
 
@@ -135,6 +147,9 @@ def test_normalized_landmarks_build_face_and_eye_boxes() -> None:
     assert face.bbox.width > 70
     assert face.bbox.height > 140
     assert face.right_eye.x < face.left_eye.x
+    assert face.left_iris.shape[1] == 2
+    assert face.left_upper_eyelid.shape[1] == 2
+    assert face.lip_inner.shape[1] == 2
 
 
 def test_effect_pipeline_keeps_shape_with_frame_asset() -> None:
@@ -194,6 +209,12 @@ def test_effect_settings_validation_bounds() -> None:
     with pytest.raises(ValidationError):
         EffectSettings(processing_profile="turbo")
 
+    with pytest.raises(ValidationError):
+        EffectSettings(doll_intensity=1.1)
+
+    with pytest.raises(ValidationError):
+        EffectSettings(soft_glow=-0.1)
+
 
 def test_face_skin_mask_is_limited_to_detected_face_and_excludes_parts() -> None:
     frame = np.zeros((160, 120, 3), dtype=np.uint8)
@@ -222,6 +243,8 @@ def test_segmenter_masks_include_body_skin_and_hair_near_face() -> None:
     assert result.face_skin[60, 60] > 0.8
     assert result.hair[25, 60] > 0.25
     assert result.head[25, 60] >= result.hair[25, 60]
+    assert result.background.shape == image_shape[:2]
+    assert result.clothes.shape == image_shape[:2]
 
 
 def test_protected_mask_covers_eyes_lips_and_brows() -> None:
@@ -278,13 +301,60 @@ def test_eye_zoom_face_slim_and_debug_boxes_change_frame() -> None:
     eye = DetectionBox(24, 24, 12, 12)
 
     zoomed = local_zoom(frame, eye, strength=0.35)
+    rounded = local_eye_round(frame, eye, strength=0.35)
     slimmed = local_translate(frame, (28, 50), (6, 0), radius=20)
     debugged = draw_detection_debug(frame, synthetic_face((80, 80, 3)))
 
     assert zoomed.shape == frame.shape
+    assert rounded.shape == frame.shape
     assert slimmed.shape == frame.shape
     assert debugged.shape == frame.shape
     assert not np.array_equal(debugged, frame)
+
+
+def test_doll_eye_lip_background_and_glow_effects_preserve_shape() -> None:
+    frame = np.full((160, 120, 3), 96, dtype=np.uint8)
+    detections = synthetic_face(frame.shape)
+    face = detections.faces[0]
+    masks = synthetic_masks(frame.shape, detections)
+    settings = EffectSettings(
+        doll_intensity=1.0,
+        eye_liner=1.0,
+        lash_emphasis=1.0,
+        lower_eyelid=1.0,
+        iris_gloss=1.0,
+        lip_gloss=1.0,
+        background_high_key=1.0,
+        soft_glow=1.0,
+    )
+
+    eye = apply_doll_eye_makeup(frame, face, settings)
+    lip = apply_doll_lip_gloss(frame, face, settings)
+    background = apply_background_high_key(frame, settings, masks)
+    glow = apply_soft_glow(frame, settings)
+
+    for result in (eye, lip, background, glow):
+        assert result.shape == frame.shape
+        assert result.dtype == np.uint8
+        assert not np.array_equal(result, frame)
+    assert background[4, 4].mean() > frame[4, 4].mean()
+
+
+def test_porcelain_skin_respects_protected_parts_more_than_cheeks() -> None:
+    frame = np.full((160, 120, 3), 80, dtype=np.uint8)
+    detections = synthetic_face(frame.shape)
+    masks = synthetic_masks(frame.shape, detections)
+    face = detections.faces[0]
+    settings = EffectSettings(doll_intensity=1.0, porcelain_skin=1.0, skin_whitening=1.0)
+
+    result = apply_porcelain_skin(frame, settings, masks)
+
+    cheek_point = (int(face.bbox.y + face.bbox.height * 0.64), int(face.bbox.x + face.bbox.width * 0.36))
+    eye_point = (face.left_eye.y + face.left_eye.height // 2, face.left_eye.x + face.left_eye.width // 2)
+    cheek_delta = int(np.abs(result[cheek_point] - frame[cheek_point]).sum())
+    eye_delta = int(np.abs(result[eye_point] - frame[eye_point]).sum())
+    assert result.shape == frame.shape
+    assert cheek_delta > eye_delta
 
 
 def test_debug_overlay_modes_change_frame() -> None:
