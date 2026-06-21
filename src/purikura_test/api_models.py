@@ -17,31 +17,88 @@ class CameraSelection(BaseModel):
 
 
 class EffectSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     processing_profile: Literal["quality", "fast"] = "quality"
     skin_smoothing: float = Field(default=0.78, ge=0.0, le=1.0)
     purikura_intensity: float = Field(default=0.86, ge=0.0, le=1.0)
-    skin_whitening: float = Field(default=0.76, ge=0.0, le=1.0)
     eye_enlarge: float = Field(default=0.30, ge=0.0, le=0.6)
     face_slim: float = Field(default=0.30, ge=0.0, le=0.6)
-    eye_sparkle: float = Field(default=0.68, ge=0.0, le=1.0)
-    lip_tint: float = Field(default=0.34, ge=0.0, le=1.0)
-    blush: float = Field(default=0.36, ge=0.0, le=1.0)
-    brightness: int = Field(default=8, ge=-80, le=80)
-    contrast: float = Field(default=0.94, ge=0.5, le=2.0)
-    saturation: float = Field(default=1.08, ge=0.0, le=2.0)
     doll_intensity: float = Field(default=0.65, ge=0.0, le=1.0)
-    porcelain_skin: float = Field(default=0.72, ge=0.0, le=1.0)
-    eye_roundness: float = Field(default=0.55, ge=0.0, le=1.0)
-    eye_liner: float = Field(default=0.55, ge=0.0, le=1.0)
-    lash_emphasis: float = Field(default=0.45, ge=0.0, le=1.0)
-    lower_eyelid: float = Field(default=0.50, ge=0.0, le=1.0)
-    iris_gloss: float = Field(default=0.60, ge=0.0, le=1.0)
-    cheek_gradient: float = Field(default=0.50, ge=0.0, le=1.0)
-    lip_gloss: float = Field(default=0.55, ge=0.0, le=1.0)
-    hair_silk: float = Field(default=0.35, ge=0.0, le=1.0)
     background_high_key: float = Field(default=0.35, ge=0.0, le=1.0)
-    soft_glow: float = Field(default=0.45, ge=0.0, le=1.0)
     debug_overlay: Literal["off", "landmarks", "masks", "parts", "all"] = "off"
+
+    @staticmethod
+    def _clamp01(value: float) -> float:
+        return max(0.0, min(1.0, value))
+
+    @property
+    def skin_whitening(self) -> float:
+        return self._clamp01(0.50 + 0.20 * self.purikura_intensity + 0.14 * self.doll_intensity)
+
+    @property
+    def eye_sparkle(self) -> float:
+        return self._clamp01(0.30 + 0.62 * self.doll_intensity)
+
+    @property
+    def lip_tint(self) -> float:
+        return self._clamp01(0.22 + 0.48 * self.doll_intensity)
+
+    @property
+    def blush(self) -> float:
+        return self._clamp01(0.24 + 0.50 * self.doll_intensity)
+
+    @property
+    def brightness(self) -> int:
+        return int(round(2 + 7 * self.purikura_intensity))
+
+    @property
+    def contrast(self) -> float:
+        return max(0.78, 1.0 - 0.07 * self.purikura_intensity)
+
+    @property
+    def saturation(self) -> float:
+        return 1.0 + 0.09 * self.purikura_intensity
+
+    @property
+    def porcelain_skin(self) -> float:
+        return self._clamp01(0.28 + 0.70 * self.doll_intensity)
+
+    @property
+    def eye_roundness(self) -> float:
+        return self._clamp01(0.15 + 0.62 * self.doll_intensity)
+
+    @property
+    def eye_liner(self) -> float:
+        return self._clamp01(0.16 + 0.60 * self.doll_intensity)
+
+    @property
+    def lash_emphasis(self) -> float:
+        return self._clamp01(0.12 + 0.51 * self.doll_intensity)
+
+    @property
+    def lower_eyelid(self) -> float:
+        return self._clamp01(0.14 + 0.55 * self.doll_intensity)
+
+    @property
+    def iris_gloss(self) -> float:
+        return self._clamp01(0.18 + 0.65 * self.doll_intensity)
+
+    @property
+    def cheek_gradient(self) -> float:
+        return self._clamp01(0.15 + 0.54 * self.doll_intensity)
+
+    @property
+    def lip_gloss(self) -> float:
+        return self._clamp01(0.17 + 0.58 * self.doll_intensity)
+
+    @property
+    def hair_silk(self) -> float:
+        return self._clamp01(0.08 + 0.42 * self.doll_intensity)
+
+    @property
+    def soft_glow(self) -> float:
+        return self._clamp01(0.12 + 0.51 * self.doll_intensity)
 
 
 class FrameSummary(BaseModel):

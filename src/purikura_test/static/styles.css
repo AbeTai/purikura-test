@@ -93,6 +93,18 @@ h2 {
   font-size: 16px;
 }
 
+.panel-description,
+.control-help {
+  color: #667085;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.5;
+}
+
+.panel-description {
+  margin: 0 0 14px;
+}
+
 label {
   display: grid;
   gap: 8px;

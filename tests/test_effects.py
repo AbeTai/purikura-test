@@ -164,7 +164,7 @@ def test_effect_pipeline_keeps_shape_with_frame_asset() -> None:
         segmenter=StaticSegmenter(synthetic_masks(base.shape, detections)),
     ).apply(
         base,
-        EffectSettings(skin_smoothing=0.8, brightness=10, contrast=1.0, saturation=1.2),
+        EffectSettings(skin_smoothing=0.8, purikura_intensity=0.8),
         FrameAsset(id=1, name="test", image_bgra=overlay),
     )
 
@@ -198,9 +198,6 @@ def test_effect_settings_validation_bounds() -> None:
         EffectSettings(skin_smoothing=1.1)
 
     with pytest.raises(ValidationError):
-        EffectSettings(brightness=-81)
-
-    with pytest.raises(ValidationError):
         EffectSettings(eye_enlarge=0.7)
 
     with pytest.raises(ValidationError):
@@ -213,7 +210,7 @@ def test_effect_settings_validation_bounds() -> None:
         EffectSettings(doll_intensity=1.1)
 
     with pytest.raises(ValidationError):
-        EffectSettings(soft_glow=-0.1)
+        EffectSettings(lip_gloss=0.5)
 
 
 def test_face_skin_mask_is_limited_to_detected_face_and_excludes_parts() -> None:
@@ -319,13 +316,7 @@ def test_doll_eye_lip_background_and_glow_effects_preserve_shape() -> None:
     masks = synthetic_masks(frame.shape, detections)
     settings = EffectSettings(
         doll_intensity=1.0,
-        eye_liner=1.0,
-        lash_emphasis=1.0,
-        lower_eyelid=1.0,
-        iris_gloss=1.0,
-        lip_gloss=1.0,
         background_high_key=1.0,
-        soft_glow=1.0,
     )
 
     eye = apply_doll_eye_makeup(frame, face, settings)
@@ -345,7 +336,7 @@ def test_porcelain_skin_respects_protected_parts_more_than_cheeks() -> None:
     detections = synthetic_face(frame.shape)
     masks = synthetic_masks(frame.shape, detections)
     face = detections.faces[0]
-    settings = EffectSettings(doll_intensity=1.0, porcelain_skin=1.0, skin_whitening=1.0)
+    settings = EffectSettings(doll_intensity=1.0, purikura_intensity=1.0)
 
     result = apply_porcelain_skin(frame, settings, masks)
 

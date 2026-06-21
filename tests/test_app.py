@@ -39,36 +39,18 @@ def test_app_core_api_flow(monkeypatch) -> None:
                 "processing_profile": "fast",
                 "skin_smoothing": 0.2,
                 "purikura_intensity": 0.7,
-                "skin_whitening": 0.8,
                 "eye_enlarge": 0.12,
                 "face_slim": 0.2,
-                "eye_sparkle": 0.7,
-                "lip_tint": 0.3,
-                "blush": 0.4,
-                "brightness": 5,
-                "contrast": 1.1,
-                "saturation": 1.2,
                 "doll_intensity": 0.9,
-                "porcelain_skin": 0.8,
-                "eye_roundness": 0.7,
-                "eye_liner": 0.6,
-                "lash_emphasis": 0.5,
-                "lower_eyelid": 0.4,
-                "iris_gloss": 0.9,
-                "cheek_gradient": 0.8,
-                "lip_gloss": 0.7,
-                "hair_silk": 0.5,
                 "background_high_key": 0.6,
-                "soft_glow": 0.7,
                 "debug_overlay": "masks",
             },
         )
         assert effects.status_code == 200
-        assert effects.json()["brightness"] == 5
         assert effects.json()["processing_profile"] == "fast"
         assert effects.json()["debug_overlay"] == "masks"
         assert effects.json()["doll_intensity"] == 0.9
-        assert effects.json()["lip_gloss"] == 0.7
+        assert "lip_gloss" not in effects.json()
 
         performance = client.get("/api/performance")
         assert performance.status_code == 200
@@ -81,19 +63,30 @@ def test_app_core_api_flow(monkeypatch) -> None:
                 "processing_profile": "quality",
                 "skin_smoothing": 2,
                 "purikura_intensity": 0.7,
-                "skin_whitening": 0.8,
                 "eye_enlarge": 0.12,
                 "face_slim": 0.2,
-                "eye_sparkle": 0.7,
-                "lip_tint": 0.3,
-                "blush": 0.4,
-                "brightness": 5,
-                "contrast": 1.1,
-                "saturation": 1.2,
+                "doll_intensity": 0.7,
+                "background_high_key": 0.6,
                 "debug_overlay": "off",
             },
         )
         assert invalid_effects.status_code == 422
+
+        removed_effects = client.put(
+            "/api/effects",
+            json={
+                "processing_profile": "quality",
+                "skin_smoothing": 0.2,
+                "purikura_intensity": 0.7,
+                "eye_enlarge": 0.12,
+                "face_slim": 0.2,
+                "doll_intensity": 0.7,
+                "background_high_key": 0.6,
+                "lip_gloss": 0.7,
+                "debug_overlay": "off",
+            },
+        )
+        assert removed_effects.status_code == 422
 
         invalid_profile = client.put(
             "/api/effects",
@@ -101,15 +94,10 @@ def test_app_core_api_flow(monkeypatch) -> None:
                 "processing_profile": "turbo",
                 "skin_smoothing": 0.2,
                 "purikura_intensity": 0.7,
-                "skin_whitening": 0.8,
                 "eye_enlarge": 0.12,
                 "face_slim": 0.2,
-                "eye_sparkle": 0.7,
-                "lip_tint": 0.3,
-                "blush": 0.4,
-                "brightness": 5,
-                "contrast": 1.1,
-                "saturation": 1.2,
+                "doll_intensity": 0.7,
+                "background_high_key": 0.6,
                 "debug_overlay": "off",
             },
         )

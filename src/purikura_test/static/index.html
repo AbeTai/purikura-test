@@ -34,98 +34,38 @@
 
         <section class="panel">
           <h2>Effects</h2>
+          <p class="panel-description">
+            基本はPurikuraとDoll styleを調整してください。細かい美白、チーク、リップ、アイライン、涙袋、グローは内部で自動配分されます。
+          </p>
           <label>
-            Purikura
+            Purikura strength
             <input id="purikura" type="range" min="0" max="1" step="0.05" />
+            <span class="control-help">全体の明るさ、美白、ピンク寄せ、プリクラらしいトーンをまとめて強めます。</span>
           </label>
           <label>
-            Skin
+            Skin smoothing
             <input id="skin" type="range" min="0" max="1" step="0.05" />
-          </label>
-          <label>
-            Whitening
-            <input id="skin-whitening" type="range" min="0" max="1" step="0.05" />
+            <span class="control-help">顔、首、手などの肌領域をなめらかにします。目、眉、唇は保護されます。</span>
           </label>
           <label>
             Eye enlarge
             <input id="eye-enlarge" type="range" min="0" max="0.6" step="0.01" />
+            <span class="control-help">目周辺を局所変形して大きく見せます。Doll styleと合わせると丸い目になります。</span>
           </label>
           <label>
             Face slim
             <input id="face-slim" type="range" min="0" max="0.6" step="0.01" />
+            <span class="control-help">頬下と顎を内側へ寄せて、Vライン寄りの小顔にします。</span>
           </label>
           <label>
-            Eye sparkle
-            <input id="eye-sparkle" type="range" min="0" max="1" step="0.05" />
-          </label>
-          <label>
-            Lip tint
-            <input id="lip-tint" type="range" min="0" max="1" step="0.05" />
-          </label>
-          <label>
-            Blush
-            <input id="blush" type="range" min="0" max="1" step="0.05" />
-          </label>
-          <label>
-            Brightness
-            <input id="brightness" type="range" min="-80" max="80" step="1" />
-          </label>
-          <label>
-            Contrast
-            <input id="contrast" type="range" min="0.5" max="2" step="0.05" />
-          </label>
-          <label>
-            Saturation
-            <input id="saturation" type="range" min="0" max="2" step="0.05" />
-          </label>
-          <h2>Doll Details</h2>
-          <label>
-            Doll intensity
+            Doll style
             <input id="doll-intensity" type="range" min="0" max="1" step="0.05" />
+            <span class="control-help">陶器肌、丸い目、アイライン、まつ毛、涙袋、瞳グロス、チーク、リップ、髪のなめらかさ、ソフトグローをまとめて調整します。</span>
           </label>
           <label>
-            Porcelain skin
-            <input id="porcelain-skin" type="range" min="0" max="1" step="0.05" />
-          </label>
-          <label>
-            Eye roundness
-            <input id="eye-roundness" type="range" min="0" max="1" step="0.05" />
-          </label>
-          <label>
-            Eye liner
-            <input id="eye-liner" type="range" min="0" max="1" step="0.05" />
-          </label>
-          <label>
-            Lash emphasis
-            <input id="lash-emphasis" type="range" min="0" max="1" step="0.05" />
-          </label>
-          <label>
-            Lower eyelid
-            <input id="lower-eyelid" type="range" min="0" max="1" step="0.05" />
-          </label>
-          <label>
-            Iris gloss
-            <input id="iris-gloss" type="range" min="0" max="1" step="0.05" />
-          </label>
-          <label>
-            Cheek gradient
-            <input id="cheek-gradient" type="range" min="0" max="1" step="0.05" />
-          </label>
-          <label>
-            Lip gloss
-            <input id="lip-gloss" type="range" min="0" max="1" step="0.05" />
-          </label>
-          <label>
-            Hair silk
-            <input id="hair-silk" type="range" min="0" max="1" step="0.05" />
-          </label>
-          <label>
-            Background high key
+            Background
             <input id="background-high-key" type="range" min="0" max="1" step="0.05" />
-          </label>
-          <label>
-            Soft glow
-            <input id="soft-glow" type="range" min="0" max="1" step="0.05" />
+            <span class="control-help">背景マスクだけを白/薄ピンクへ寄せ、スタジオ風の高キー背景にします。</span>
           </label>
           <label>
             Debug overlay
@@ -136,6 +76,7 @@
               <option value="parts">Parts</option>
               <option value="all">All</option>
             </select>
+            <span class="control-help">顔ランドマーク、肌/髪/背景マスク、鼻や頬などの部位領域を確認できます。</span>
           </label>
         </section>
 
