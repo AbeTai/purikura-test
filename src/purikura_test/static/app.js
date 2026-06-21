@@ -7,9 +7,12 @@ const capturesEl = document.querySelector("#captures");
 
 const controls = {
   skin_smoothing: document.querySelector("#skin"),
+  purikura_intensity: document.querySelector("#purikura"),
+  eye_enlarge: document.querySelector("#eye-enlarge"),
   brightness: document.querySelector("#brightness"),
   contrast: document.querySelector("#contrast"),
   saturation: document.querySelector("#saturation"),
+  face_debug_boxes: document.querySelector("#face-debug-boxes"),
 };
 
 function setStatus(message) {
@@ -40,16 +43,23 @@ async function loadCameras() {
 async function loadEffects() {
   const settings = await requestJson("/api/effects");
   for (const [key, input] of Object.entries(controls)) {
-    input.value = settings[key];
+    if (input.type === "checkbox") {
+      input.checked = settings[key];
+    } else {
+      input.value = settings[key];
+    }
   }
 }
 
 async function saveEffects() {
   const body = {
     skin_smoothing: Number(controls.skin_smoothing.value),
+    purikura_intensity: Number(controls.purikura_intensity.value),
+    eye_enlarge: Number(controls.eye_enlarge.value),
     brightness: Number(controls.brightness.value),
     contrast: Number(controls.contrast.value),
     saturation: Number(controls.saturation.value),
+    face_debug_boxes: controls.face_debug_boxes.checked,
   };
   await requestJson("/api/effects", {
     method: "PUT",
@@ -90,7 +100,8 @@ async function loadCaptures() {
 }
 
 for (const input of Object.values(controls)) {
-  input.addEventListener("input", async () => {
+  const eventName = input.type === "checkbox" ? "change" : "input";
+  input.addEventListener(eventName, async () => {
     try {
       await saveEffects();
       setStatus("Effects updated");

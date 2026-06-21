@@ -101,6 +101,12 @@ label {
   font-weight: 600;
 }
 
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
 select,
 input[type="file"] {
   width: 100%;

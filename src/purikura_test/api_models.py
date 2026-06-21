@@ -17,9 +17,12 @@ class CameraSelection(BaseModel):
 
 class EffectSettings(BaseModel):
     skin_smoothing: float = Field(default=0.35, ge=0.0, le=1.0)
+    purikura_intensity: float = Field(default=0.65, ge=0.0, le=1.0)
+    eye_enlarge: float = Field(default=0.16, ge=0.0, le=0.45)
     brightness: int = Field(default=0, ge=-80, le=80)
     contrast: float = Field(default=1.0, ge=0.5, le=2.0)
     saturation: float = Field(default=1.0, ge=0.0, le=2.0)
+    face_debug_boxes: bool = False
 
 
 class FrameSummary(BaseModel):

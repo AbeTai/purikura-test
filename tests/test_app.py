@@ -35,14 +35,31 @@ def test_app_core_api_flow(monkeypatch) -> None:
 
         effects = client.put(
             "/api/effects",
-            json={"skin_smoothing": 0.2, "brightness": 5, "contrast": 1.1, "saturation": 1.2},
+            json={
+                "skin_smoothing": 0.2,
+                "purikura_intensity": 0.7,
+                "eye_enlarge": 0.12,
+                "brightness": 5,
+                "contrast": 1.1,
+                "saturation": 1.2,
+                "face_debug_boxes": True,
+            },
         )
         assert effects.status_code == 200
         assert effects.json()["brightness"] == 5
+        assert effects.json()["face_debug_boxes"] is True
 
         invalid_effects = client.put(
             "/api/effects",
-            json={"skin_smoothing": 2, "brightness": 5, "contrast": 1.1, "saturation": 1.2},
+            json={
+                "skin_smoothing": 2,
+                "purikura_intensity": 0.7,
+                "eye_enlarge": 0.12,
+                "brightness": 5,
+                "contrast": 1.1,
+                "saturation": 1.2,
+                "face_debug_boxes": False,
+            },
         )
         assert invalid_effects.status_code == 422
 
