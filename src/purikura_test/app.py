@@ -18,6 +18,7 @@ from purikura_test.api_models import (
     CurrentFrameSelection,
     EffectSettings,
     FrameSummary,
+    PerformanceSummary,
 )
 from purikura_test.camera import discover_cameras
 from purikura_test.repository import CaptureRepository
@@ -98,6 +99,10 @@ def create_app(
     @app.put("/api/effects", response_model=EffectSettings)
     def put_effects(settings: EffectSettings) -> EffectSettings:
         return app_runtime.update_settings(settings)
+
+    @app.get("/api/performance", response_model=PerformanceSummary)
+    def performance() -> PerformanceSummary:
+        return app_runtime.performance()
 
     @app.post("/api/frames", response_model=FrameSummary)
     async def upload_frame(file: UploadFile = File(...)) -> FrameSummary:

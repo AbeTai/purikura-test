@@ -18,11 +18,13 @@ from purikura_test.effects import (
     alpha_composite_bgra,
     build_face_skin_mask,
     build_part_masks,
+    CachedFaceTracker,
     draw_debug_overlay,
     draw_detection_debug,
     empty_masks,
     face_geometry_from_box,
     face_geometry_from_normalized_landmarks,
+    head_roi,
     local_translate,
     local_zoom,
     masks_from_segmenter_result,
@@ -43,6 +45,21 @@ class StaticSegmenter:
 
     def segment(self, frame_bgr: np.ndarray, detections: FaceDetections) -> SegmentationMasks:
         return self.masks
+
+
+class DynamicSegmenter:
+    def segment(self, frame_bgr: np.ndarray, detections: FaceDetections) -> SegmentationMasks:
+        return synthetic_masks(frame_bgr.shape, detections)
+
+
+class CountingTracker:
+    def __init__(self, detections: FaceDetections) -> None:
+        self.detections = detections
+        self.calls = 0
+
+    def detect(self, frame_bgr: np.ndarray) -> FaceDetections:
+        self.calls += 1
+        return self.detections
 
 
 class FakeMask:
@@ -140,6 +157,27 @@ def test_effect_pipeline_keeps_shape_with_frame_asset() -> None:
     assert result.dtype == np.uint8
 
 
+def test_fast_effect_pipeline_keeps_source_shape_with_frame_asset() -> None:
+    base = np.full((240, 320, 3), 82, dtype=np.uint8)
+    detections = synthetic_face((120, 160, 3))
+    overlay = np.zeros((8, 8, 4), dtype=np.uint8)
+    overlay[:, :, 2] = 255
+    overlay[:, :, 3] = 96
+
+    result = EffectPipeline(
+        tracker=StaticTracker(detections),
+        segmenter=DynamicSegmenter(),
+    ).apply(
+        base,
+        EffectSettings(processing_profile="fast", skin_smoothing=0.7),
+        FrameAsset(id=1, name="test", image_bgra=overlay),
+    )
+
+    assert result.shape == base.shape
+    assert result.dtype == np.uint8
+    assert not np.array_equal(result, base)
+
+
 def test_effect_settings_validation_bounds() -> None:
     with pytest.raises(ValidationError):
         EffectSettings(skin_smoothing=1.1)
@@ -152,6 +190,9 @@ def test_effect_settings_validation_bounds() -> None:
 
     with pytest.raises(ValidationError):
         EffectSettings(debug_overlay="boxes")
+
+    with pytest.raises(ValidationError):
+        EffectSettings(processing_profile="turbo")
 
 
 def test_face_skin_mask_is_limited_to_detected_face_and_excludes_parts() -> None:
@@ -205,6 +246,30 @@ def test_part_masks_for_nose_cheeks_forehead_and_chin() -> None:
     assert parts.cheeks[int(face.bbox.y + face.bbox.height * 0.64), int(face.bbox.x + face.bbox.width * 0.36)] > 0.1
     assert np.max(parts.forehead) > 0.1
     assert np.max(parts.chin) > 0.1
+
+
+def test_cached_face_tracker_skips_intermediate_frames() -> None:
+    frame = np.zeros((120, 160, 3), dtype=np.uint8)
+    tracker = CountingTracker(synthetic_face(frame.shape))
+    cached = CachedFaceTracker(tracker, detect_every_n_frames=2)
+
+    for _ in range(5):
+        assert cached.detect(frame).faces
+
+    assert tracker.calls == 3
+
+
+def test_head_roi_uses_face_and_mask_bounds() -> None:
+    image_shape = (160, 120, 3)
+    detections = synthetic_face(image_shape)
+    masks = synthetic_masks(image_shape, detections)
+
+    roi = head_roi(image_shape, detections, masks)
+
+    assert roi is not None
+    y1, y2, x1, x2 = roi
+    assert 0 <= x1 < x2 <= image_shape[1]
+    assert 0 <= y1 < y2 <= image_shape[0]
 
 
 def test_eye_zoom_face_slim_and_debug_boxes_change_frame() -> None:

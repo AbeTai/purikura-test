@@ -9,7 +9,7 @@ import cv2
 import numpy as np
 from PIL import Image, UnidentifiedImageError
 
-from purikura_test.api_models import EffectSettings
+from purikura_test.api_models import EffectSettings, PerformanceSummary
 from purikura_test.camera import CameraSource, OpenCVCameraSource
 from purikura_test.effects import EffectPipeline, FrameAsset
 from purikura_test.repository import CaptureRepository
@@ -37,35 +37,44 @@ class PurikuraRuntime:
         self.settings = EffectSettings()
         self.current_frame_id: int | None = None
         self._frame_asset: FrameAsset | None = None
+        self._pending_frame: np.ndarray | None = None
         self._latest_processed: np.ndarray | None = None
+        self._latest_jpeg: bytes | None = None
+        self._performance = PerformanceSummary()
         self._lock = threading.RLock()
         self._pipeline_lock = threading.Lock()
         self._stop = threading.Event()
-        self._thread: threading.Thread | None = None
+        self._camera_thread: threading.Thread | None = None
+        self._processor_thread: threading.Thread | None = None
 
     @property
     def camera_id(self) -> int:
         return self.camera.camera_id
 
     def start(self) -> None:
-        if self._thread is not None and self._thread.is_alive():
+        if self._camera_thread is not None and self._camera_thread.is_alive():
             return
         self._ensure_pipeline()
         self._stop.clear()
         self.camera.start()
-        self._thread = threading.Thread(target=self._read_loop, name="purikura-camera", daemon=True)
-        self._thread.start()
+        self._camera_thread = threading.Thread(target=self._read_loop, name="purikura-camera", daemon=True)
+        self._processor_thread = threading.Thread(target=self._process_loop, name="purikura-processor", daemon=True)
+        self._camera_thread.start()
+        self._processor_thread.start()
 
     def stop(self) -> None:
         self._stop.set()
-        if self._thread is not None:
-            self._thread.join(timeout=2.0)
-            self._thread = None
+        if self._camera_thread is not None:
+            self._camera_thread.join(timeout=2.0)
+            self._camera_thread = None
+        if self._processor_thread is not None:
+            self._processor_thread.join(timeout=2.0)
+            self._processor_thread = None
         self.camera.stop()
 
     def switch_camera(self, camera_id: int) -> None:
         with self._lock:
-            was_running = self._thread is not None and self._thread.is_alive()
+            was_running = self._camera_thread is not None and self._camera_thread.is_alive()
         if was_running:
             self.stop()
         self.camera = OpenCVCameraSource(camera_id)
@@ -76,6 +85,10 @@ class PurikuraRuntime:
         with self._lock:
             self.settings = settings
             return self.settings
+
+    def performance(self) -> PerformanceSummary:
+        with self._lock:
+            return self._performance.model_copy()
 
     def set_frame(self, frame_id: int | None) -> None:
         with self._lock:
@@ -95,13 +108,20 @@ class PurikuraRuntime:
 
     def latest_jpeg(self) -> bytes | None:
         with self._lock:
+            if self._latest_jpeg is not None:
+                return self._latest_jpeg
             frame = None if self._latest_processed is None else self._latest_processed.copy()
         if frame is None:
             return None
+        started = time.perf_counter()
         ok, encoded = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
         if not ok:
             return None
-        return encoded.tobytes()
+        blob = encoded.tobytes()
+        with self._lock:
+            self._latest_jpeg = blob
+            self._performance.encode_ms = (time.perf_counter() - started) * 1000
+        return blob
 
     def capture_current(self) -> EncodedFrame | None:
         with self._lock:
@@ -122,12 +142,36 @@ class PurikuraRuntime:
                 time.sleep(0.05)
                 continue
             with self._lock:
+                if self._pending_frame is not None:
+                    self._performance.dropped_frames += 1
+                self._pending_frame = raw
+            time.sleep(0.001)
+
+    def _process_loop(self) -> None:
+        while not self._stop.is_set():
+            with self._lock:
+                raw = self._pending_frame
+                self._pending_frame = None
                 settings = self.settings
                 frame_asset = self._frame_asset
+            if raw is None:
+                time.sleep(0.005)
+                continue
+
+            started = time.perf_counter()
             processed = self._ensure_pipeline().apply(raw, settings, frame_asset)
+            processed_at = time.perf_counter()
+            ok, encoded = cv2.imencode(".jpg", processed, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+            encoded_at = time.perf_counter()
+            processing_ms = (processed_at - started) * 1000
+            encode_ms = (encoded_at - processed_at) * 1000
             with self._lock:
                 self._latest_processed = processed
-            time.sleep(0.01)
+                self._latest_jpeg = encoded.tobytes() if ok else None
+                self._performance.processing_ms = processing_ms
+                self._performance.encode_ms = encode_ms
+                self._performance.effective_fps = 1000 / processing_ms if processing_ms > 0 else 0.0
+                self._performance.profile = settings.processing_profile
 
     def _ensure_pipeline(self) -> EffectPipeline:
         if self._pipeline is not None:

@@ -71,6 +71,7 @@ SEG_CLOTHES = 4
 SEG_OTHERS = 5
 SEGMENT_EVERY_N_FRAMES = 4
 MASK_EMA_ALPHA = 0.65
+FAST_PROCESS_WIDTH = 640
 
 
 @dataclass(frozen=True)
@@ -296,7 +297,7 @@ def default_segmenter_model_path() -> Path:
     return Path(__file__).resolve().parents[2] / "models" / "selfie_multiclass_256x256.tflite"
 
 
-class EffectPipeline:
+class QualityEffectPipeline:
     """Applies purikura effects using MediaPipe face landmarks and multiclass masks."""
 
     def __init__(
@@ -462,6 +463,215 @@ class EffectPipeline:
             for eye in face.eyes:
                 result = local_zoom(result, eye, min(0.58, strength * 1.35), scale_x=2.25, scale_y=1.95)
         return result
+
+
+class CachedFaceTracker:
+    def __init__(self, tracker: FaceTracker, detect_every_n_frames: int = 2) -> None:
+        self._tracker = tracker
+        self._detect_every_n_frames = max(1, detect_every_n_frames)
+        self._frame_index = 0
+        self._last_detections = FaceDetections(faces=())
+
+    def detect(self, frame_bgr: np.ndarray) -> FaceDetections:
+        self._frame_index += 1
+        if self._last_detections.faces and (self._frame_index - 1) % self._detect_every_n_frames != 0:
+            return self._last_detections
+        self._last_detections = self._tracker.detect(frame_bgr)
+        return self._last_detections
+
+
+class FastEffectPipeline:
+    """Lower-latency purikura pipeline for live preview."""
+
+    def __init__(
+        self,
+        tracker: FaceTracker | None = None,
+        detector: FaceTracker | None = None,
+        segmenter: HeadSegmenterProtocol | None = None,
+        *,
+        process_width: int = FAST_PROCESS_WIDTH,
+    ) -> None:
+        base_tracker = tracker or detector or MediaPipeFaceTracker()
+        self.tracker = CachedFaceTracker(base_tracker, detect_every_n_frames=2)
+        self.segmenter = segmenter or HeadSegmenter(segment_every_n_frames=8, ema_alpha=0.72)
+        self.process_width = process_width
+
+    def apply(
+        self,
+        frame_bgr: np.ndarray,
+        settings: EffectSettings,
+        frame_asset: FrameAsset | None = None,
+    ) -> np.ndarray:
+        source_height, source_width = frame_bgr.shape[:2]
+        working = resize_for_processing(frame_bgr, self.process_width)
+        detections = self.tracker.detect(working)
+        masks = self.segmenter.segment(working, detections)
+
+        adjusted = working.copy()
+        adjusted = QualityEffectPipeline._apply_face_slim(adjusted, detections, settings.face_slim * settings.purikura_intensity * 0.82)
+        adjusted = QualityEffectPipeline._enlarge_eyes(adjusted, detections, settings.eye_enlarge * settings.purikura_intensity * 0.9)
+        adjusted = self._apply_fast_beauty(adjusted, settings, detections, masks)
+        adjusted = self._apply_fast_tone(adjusted, settings)
+        if settings.debug_overlay != "off":
+            adjusted = draw_debug_overlay(adjusted, detections, masks, settings.debug_overlay)
+
+        if adjusted.shape[:2] != (source_height, source_width):
+            adjusted = cv2.resize(adjusted, (source_width, source_height), interpolation=cv2.INTER_LINEAR)
+        return adjusted if frame_asset is None else alpha_composite_bgra(adjusted, frame_asset.image_bgra)
+
+    @staticmethod
+    def _apply_fast_beauty(
+        frame_bgr: np.ndarray,
+        settings: EffectSettings,
+        detections: FaceDetections,
+        masks: SegmentationMasks,
+    ) -> np.ndarray:
+        roi = head_roi(frame_bgr.shape, detections, masks)
+        if roi is None:
+            return frame_bgr
+
+        result = frame_bgr.copy()
+        y1, y2, x1, x2 = roi
+        base = result[y1:y2, x1:x2]
+        if base.size == 0:
+            return result
+
+        intensity = settings.purikura_intensity
+        skin = np.clip(masks.skin[y1:y2, x1:x2] * (1.0 - masks.protected[y1:y2, x1:x2]), 0.0, 1.0)
+        hair = np.clip(masks.hair[y1:y2, x1:x2] * (1.0 - masks.skin[y1:y2, x1:x2]), 0.0, 1.0)
+        if float(np.max(skin)) <= 0.01 and float(np.max(hair)) <= 0.01:
+            return result
+
+        diameter = 7 + int(6 * max(settings.skin_smoothing, intensity))
+        if diameter % 2 == 0:
+            diameter += 1
+        smooth = cv2.bilateralFilter(base, diameter, 86 + 34 * intensity, 86 + 34 * intensity)
+        smooth = cv2.GaussianBlur(smooth, (0, 0), sigmaX=1.2 + settings.skin_smoothing)
+
+        ivory = np.full_like(base, (226, 232, 255))
+        pink = np.full_like(base, (208, 212, 255))
+        skin_target = cv2.addWeighted(smooth, 1.0 - 0.26 * settings.skin_whitening, ivory, 0.26 * settings.skin_whitening, 12 * settings.skin_whitening)
+        skin_target = cv2.addWeighted(skin_target, 1.0 - 0.08 * intensity, pink, 0.08 * intensity, 0)
+        skin_strength = np.clip(skin * (0.62 * settings.skin_smoothing + 0.34 * settings.skin_whitening + 0.24 * intensity), 0.0, 0.88)
+        blended = blend_by_mask(base, skin_target, skin_strength)
+
+        part_masks = build_part_masks(frame_bgr.shape, detections)
+        cheek = np.clip(part_masks.cheeks[y1:y2, x1:x2] * skin, 0.0, 1.0)
+        if float(np.max(cheek)) > 0.01:
+            blush_target = cv2.addWeighted(blended, 0.76, np.full_like(blended, (166, 140, 255)), 0.24, 0)
+            blended = blend_by_mask(blended, blush_target, cheek * settings.blush * 0.30)
+
+        bridge = np.clip(part_masks.nose_bridge[y1:y2, x1:x2] * skin, 0.0, 1.0)
+        if float(np.max(bridge)) > 0.01:
+            highlight = cv2.addWeighted(blended, 0.84, np.full_like(blended, (235, 238, 255)), 0.16, 4 * intensity)
+            blended = blend_by_mask(blended, highlight, bridge * (0.18 + 0.22 * intensity))
+
+        if float(np.max(hair)) > 0.01:
+            hair_target = cv2.addWeighted(blended, 0.92, pink, 0.08, 2 * intensity)
+            blended = blend_by_mask(blended, hair_target, hair * (0.06 + 0.12 * intensity))
+
+        for face in detections.faces:
+            blended_full = result.copy()
+            blended_full[y1:y2, x1:x2] = blended
+            blended_full = apply_lip_tint(blended_full, face, settings.lip_tint * intensity * 0.9)
+            blended_full = apply_eye_sparkle(blended_full, face, settings.eye_sparkle * intensity)
+            blended = blended_full[y1:y2, x1:x2]
+
+        result[y1:y2, x1:x2] = blended
+        return result
+
+    @staticmethod
+    def _apply_fast_tone(frame_bgr: np.ndarray, settings: EffectSettings) -> np.ndarray:
+        intensity = settings.purikura_intensity
+        contrast = max(0.66, settings.contrast - 0.13 * intensity)
+        brightness = settings.brightness + int(34 * intensity + 14 * settings.skin_whitening)
+        adjusted = cv2.convertScaleAbs(frame_bgr, alpha=contrast, beta=brightness)
+        pink_white = np.full_like(adjusted, (224, 226, 255))
+        return cv2.addWeighted(adjusted, 1.0 - 0.11 * intensity, pink_white, 0.11 * intensity, 0)
+
+
+class EffectPipeline:
+    """Dispatches to quality or fast purikura processing profiles."""
+
+    def __init__(
+        self,
+        tracker: FaceTracker | None = None,
+        detector: FaceTracker | None = None,
+        segmenter: HeadSegmenterProtocol | None = None,
+    ) -> None:
+        self._tracker = tracker or detector
+        self._segmenter = segmenter
+        self._quality_segmenter: HeadSegmenterProtocol | None = segmenter
+        self._fast_segmenter: HeadSegmenterProtocol | None = segmenter
+        self._quality: QualityEffectPipeline | None = None
+        self._fast: FastEffectPipeline | None = None
+
+    def apply(
+        self,
+        frame_bgr: np.ndarray,
+        settings: EffectSettings,
+        frame_asset: FrameAsset | None = None,
+    ) -> np.ndarray:
+        if settings.processing_profile == "fast":
+            return self._ensure_fast().apply(frame_bgr, settings, frame_asset)
+        return self._ensure_quality().apply(frame_bgr, settings, frame_asset)
+
+    def _ensure_quality(self) -> QualityEffectPipeline:
+        if self._quality is None:
+            if self._quality_segmenter is None:
+                self._quality_segmenter = HeadSegmenter()
+            self._quality = QualityEffectPipeline(tracker=self._ensure_tracker(), segmenter=self._quality_segmenter)
+        return self._quality
+
+    def _ensure_fast(self) -> FastEffectPipeline:
+        if self._fast is None:
+            if self._fast_segmenter is None:
+                self._fast_segmenter = HeadSegmenter(segment_every_n_frames=8, ema_alpha=0.72)
+            self._fast = FastEffectPipeline(tracker=self._ensure_tracker(), segmenter=self._fast_segmenter)
+        return self._fast
+
+    def _ensure_tracker(self) -> FaceTracker:
+        if self._tracker is None:
+            self._tracker = MediaPipeFaceTracker()
+        return self._tracker
+
+
+def resize_for_processing(frame_bgr: np.ndarray, process_width: int) -> np.ndarray:
+    height, width = frame_bgr.shape[:2]
+    if width <= process_width:
+        return frame_bgr
+    process_height = max(1, int(height * process_width / width))
+    return cv2.resize(frame_bgr, (process_width, process_height), interpolation=cv2.INTER_AREA)
+
+
+def head_roi(
+    image_shape: tuple[int, ...],
+    detections: FaceDetections,
+    masks: SegmentationMasks,
+    *,
+    padding: int = 12,
+) -> tuple[int, int, int, int] | None:
+    height, width = image_shape[:2]
+    boxes: list[tuple[int, int, int, int]] = []
+    for face in detections.faces:
+        expanded = expand_box(face.bbox, image_shape, scale_x=1.45, scale_y=1.35)
+        boxes.append((expanded.x, expanded.y, expanded.x + expanded.width, expanded.y + expanded.height))
+
+    head_uint8 = (masks.head > 0.08).astype(np.uint8)
+    if int(cv2.countNonZero(head_uint8)) > 0:
+        x, y, w, h = cv2.boundingRect(head_uint8)
+        boxes.append((x, y, x + w, y + h))
+
+    if not boxes:
+        return None
+
+    x1 = max(0, min(box[0] for box in boxes) - padding)
+    y1 = max(0, min(box[1] for box in boxes) - padding)
+    x2 = min(width, max(box[2] for box in boxes) + padding)
+    y2 = min(height, max(box[3] for box in boxes) + padding)
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return y1, y2, x1, x2
 
 
 def face_geometry_from_normalized_landmarks(landmarks: object, image_shape: tuple[int, ...]) -> FaceGeometry:

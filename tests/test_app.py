@@ -36,6 +36,7 @@ def test_app_core_api_flow(monkeypatch) -> None:
         effects = client.put(
             "/api/effects",
             json={
+                "processing_profile": "fast",
                 "skin_smoothing": 0.2,
                 "purikura_intensity": 0.7,
                 "skin_whitening": 0.8,
@@ -52,11 +53,18 @@ def test_app_core_api_flow(monkeypatch) -> None:
         )
         assert effects.status_code == 200
         assert effects.json()["brightness"] == 5
+        assert effects.json()["processing_profile"] == "fast"
         assert effects.json()["debug_overlay"] == "masks"
+
+        performance = client.get("/api/performance")
+        assert performance.status_code == 200
+        assert performance.json()["profile"] in {"quality", "fast"}
+        assert isinstance(performance.json()["dropped_frames"], int)
 
         invalid_effects = client.put(
             "/api/effects",
             json={
+                "processing_profile": "quality",
                 "skin_smoothing": 2,
                 "purikura_intensity": 0.7,
                 "skin_whitening": 0.8,
@@ -72,6 +80,26 @@ def test_app_core_api_flow(monkeypatch) -> None:
             },
         )
         assert invalid_effects.status_code == 422
+
+        invalid_profile = client.put(
+            "/api/effects",
+            json={
+                "processing_profile": "turbo",
+                "skin_smoothing": 0.2,
+                "purikura_intensity": 0.7,
+                "skin_whitening": 0.8,
+                "eye_enlarge": 0.12,
+                "face_slim": 0.2,
+                "eye_sparkle": 0.7,
+                "lip_tint": 0.3,
+                "blush": 0.4,
+                "brightness": 5,
+                "contrast": 1.1,
+                "saturation": 1.2,
+                "debug_overlay": "off",
+            },
+        )
+        assert invalid_profile.status_code == 422
 
         upload = client.post(
             "/api/frames",

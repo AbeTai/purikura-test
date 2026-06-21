@@ -6,6 +6,7 @@ const captureButton = document.querySelector("#capture-button");
 const capturesEl = document.querySelector("#captures");
 
 const controls = {
+  processing_profile: document.querySelector("#processing-profile"),
   skin_smoothing: document.querySelector("#skin"),
   purikura_intensity: document.querySelector("#purikura"),
   skin_whitening: document.querySelector("#skin-whitening"),
@@ -58,6 +59,7 @@ async function loadEffects() {
 
 async function saveEffects() {
   const body = {
+    processing_profile: controls.processing_profile.value,
     skin_smoothing: Number(controls.skin_smoothing.value),
     purikura_intensity: Number(controls.purikura_intensity.value),
     skin_whitening: Number(controls.skin_whitening.value),

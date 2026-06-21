@@ -17,6 +17,7 @@ class CameraSelection(BaseModel):
 
 
 class EffectSettings(BaseModel):
+    processing_profile: Literal["quality", "fast"] = "quality"
     skin_smoothing: float = Field(default=0.78, ge=0.0, le=1.0)
     purikura_intensity: float = Field(default=0.86, ge=0.0, le=1.0)
     skin_whitening: float = Field(default=0.76, ge=0.0, le=1.0)
@@ -56,3 +57,11 @@ class CaptureSummary(BaseModel):
 
 class CaptureCreated(BaseModel):
     id: int
+
+
+class PerformanceSummary(BaseModel):
+    processing_ms: float = 0.0
+    encode_ms: float = 0.0
+    effective_fps: float = 0.0
+    dropped_frames: int = 0
+    profile: Literal["quality", "fast"] = "quality"
