@@ -33,12 +33,13 @@ class PurikuraRuntime:
     ) -> None:
         self.repository = repository
         self.camera: CameraSource = camera or OpenCVCameraSource(0)
-        self.pipeline = pipeline or EffectPipeline()
+        self._pipeline = pipeline
         self.settings = EffectSettings()
         self.current_frame_id: int | None = None
         self._frame_asset: FrameAsset | None = None
         self._latest_processed: np.ndarray | None = None
         self._lock = threading.RLock()
+        self._pipeline_lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -49,6 +50,7 @@ class PurikuraRuntime:
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
             return
+        self._ensure_pipeline()
         self._stop.clear()
         self.camera.start()
         self._thread = threading.Thread(target=self._read_loop, name="purikura-camera", daemon=True)
@@ -122,10 +124,18 @@ class PurikuraRuntime:
             with self._lock:
                 settings = self.settings
                 frame_asset = self._frame_asset
-            processed = self.pipeline.apply(raw, settings, frame_asset)
+            processed = self._ensure_pipeline().apply(raw, settings, frame_asset)
             with self._lock:
                 self._latest_processed = processed
             time.sleep(0.01)
+
+    def _ensure_pipeline(self) -> EffectPipeline:
+        if self._pipeline is not None:
+            return self._pipeline
+        with self._pipeline_lock:
+            if self._pipeline is None:
+                self._pipeline = EffectPipeline()
+            return self._pipeline
 
 
 def decode_png_to_bgra(image_blob: bytes) -> np.ndarray:

@@ -15,6 +15,7 @@ FastAPI + OpenCV based prototype for realtime purikura-style camera effects.
 
 ```bash
 uv sync --all-extras
+uv run python scripts/download_models.py
 uv run uvicorn purikura_test.app:app --reload
 ```
 
@@ -33,3 +34,4 @@ uv run pytest
 - The initial camera source uses OpenCV camera indexes. Built-in cameras are usually index `0`; USB cameras typically appear as additional indexes.
 - Captures are stored as JPEG blobs in `data/purikura.sqlite3` by default.
 - Uploaded frames are stored as PNG blobs and resized to the active preview frame before compositing.
+- The MediaPipe face landmarker model is downloaded to `models/face_landmarker.task` and is ignored by git.
