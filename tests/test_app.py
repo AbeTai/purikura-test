@@ -47,12 +47,12 @@ def test_app_core_api_flow(monkeypatch) -> None:
                 "brightness": 5,
                 "contrast": 1.1,
                 "saturation": 1.2,
-                "face_debug_boxes": True,
+                "debug_overlay": "masks",
             },
         )
         assert effects.status_code == 200
         assert effects.json()["brightness"] == 5
-        assert effects.json()["face_debug_boxes"] is True
+        assert effects.json()["debug_overlay"] == "masks"
 
         invalid_effects = client.put(
             "/api/effects",
@@ -68,7 +68,7 @@ def test_app_core_api_flow(monkeypatch) -> None:
                 "brightness": 5,
                 "contrast": 1.1,
                 "saturation": 1.2,
-                "face_debug_boxes": False,
+                "debug_overlay": "off",
             },
         )
         assert invalid_effects.status_code == 422

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -27,7 +28,7 @@ class EffectSettings(BaseModel):
     brightness: int = Field(default=8, ge=-80, le=80)
     contrast: float = Field(default=0.94, ge=0.5, le=2.0)
     saturation: float = Field(default=1.08, ge=0.0, le=2.0)
-    face_debug_boxes: bool = False
+    debug_overlay: Literal["off", "landmarks", "masks", "parts", "all"] = "off"
 
 
 class FrameSummary(BaseModel):

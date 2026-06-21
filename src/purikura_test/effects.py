@@ -55,7 +55,22 @@ RIGHT_EYE = (33, 7, 163, 144, 145, 153, 154, 155, 133, 173, 157, 158, 159, 160, 
 LIPS = (61, 146, 91, 181, 84, 17, 314, 405, 321, 375, 291, 409, 270, 269, 267, 0, 37, 39, 40, 185)
 LEFT_CHEEK = (50, 101, 118, 117, 123, 147, 187, 205)
 RIGHT_CHEEK = (280, 330, 347, 346, 352, 376, 411, 425)
+LEFT_BROW = (276, 283, 282, 295, 285, 336, 296, 334, 293, 300)
+RIGHT_BROW = (46, 53, 52, 65, 55, 107, 66, 105, 63, 70)
+NOSE = (1, 2, 4, 5, 6, 45, 48, 64, 98, 97, 94, 326, 327, 294, 278, 275, 168, 197)
+NOSE_BRIDGE = (6, 168, 197, 195, 5, 4, 1, 2)
+FOREHEAD = (10, 67, 109, 338, 297, 151, 9)
+CHIN = (152, 148, 176, 149, 150, 136, 172, 58, 288, 397, 365, 379, 378, 400, 377)
 DEBUG_LANDMARK_STEP = 12
+
+SEG_BACKGROUND = 0
+SEG_HAIR = 1
+SEG_BODY_SKIN = 2
+SEG_FACE_SKIN = 3
+SEG_CLOTHES = 4
+SEG_OTHERS = 5
+SEGMENT_EVERY_N_FRAMES = 4
+MASK_EMA_ALPHA = 0.65
 
 
 @dataclass(frozen=True)
@@ -94,6 +109,12 @@ class FaceGeometry:
     face_oval: np.ndarray
     left_cheek: np.ndarray
     right_cheek: np.ndarray
+    left_brow: np.ndarray
+    right_brow: np.ndarray
+    nose: np.ndarray
+    nose_bridge: np.ndarray
+    forehead: np.ndarray
+    chin: np.ndarray
     landmarks: np.ndarray
 
     @property
@@ -106,8 +127,39 @@ class FaceDetections:
     faces: tuple[FaceGeometry, ...]
 
 
+@dataclass(frozen=True)
+class SegmentationMasks:
+    head: np.ndarray
+    skin: np.ndarray
+    hair: np.ndarray
+    protected: np.ndarray
+    face_skin: np.ndarray
+    body_skin: np.ndarray
+
+
+@dataclass(frozen=True)
+class PartMasks:
+    cheeks: np.ndarray
+    nose: np.ndarray
+    nose_bridge: np.ndarray
+    forehead: np.ndarray
+    chin: np.ndarray
+    brows: np.ndarray
+    protected: np.ndarray
+
+
+@dataclass(frozen=True)
+class FrameAnalysis:
+    detections: FaceDetections
+    masks: SegmentationMasks
+
+
 class FaceTracker(Protocol):
     def detect(self, frame_bgr: np.ndarray) -> FaceDetections: ...
+
+
+class HeadSegmenterProtocol(Protocol):
+    def segment(self, frame_bgr: np.ndarray, detections: FaceDetections) -> SegmentationMasks: ...
 
 
 class MediaPipeFaceTracker:
@@ -149,7 +201,10 @@ class MediaPipeFaceTracker:
         rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
         mp_image = self._mp.Image(image_format=self._mp.ImageFormat.SRGB, data=np.ascontiguousarray(rgb))
         result = self._landmarker.detect_for_video(mp_image, timestamp_ms)
-        faces = tuple(face_geometry_from_normalized_landmarks(face_landmarks, frame_bgr.shape) for face_landmarks in result.face_landmarks)
+        faces = tuple(
+            face_geometry_from_normalized_landmarks(face_landmarks, frame_bgr.shape)
+            for face_landmarks in result.face_landmarks
+        )
         if faces:
             self._last_detections = FaceDetections(faces=faces)
             self._last_detection_at = time.monotonic()
@@ -159,15 +214,99 @@ class MediaPipeFaceTracker:
         return FaceDetections(faces=())
 
 
+class HeadSegmenter:
+    """MediaPipe SelfieMulticlass segmenter. Missing models are fatal by design."""
+
+    def __init__(
+        self,
+        model_path: str | Path | None = None,
+        *,
+        segment_every_n_frames: int = SEGMENT_EVERY_N_FRAMES,
+        ema_alpha: float = MASK_EMA_ALPHA,
+    ) -> None:
+        resolved_model_path = Path(
+            model_path
+            or os.getenv("PURIKURA_SELFIE_MULTICLASS_MODEL", "")
+            or default_segmenter_model_path()
+        )
+        if not resolved_model_path.exists():
+            raise FileNotFoundError(
+                f"MediaPipe selfie multiclass model not found: {resolved_model_path}. "
+                "Run `uv run python scripts/download_models.py`."
+            )
+
+        import mediapipe as mp
+        from mediapipe.tasks import python
+        from mediapipe.tasks.python import vision
+
+        options = vision.ImageSegmenterOptions(
+            base_options=python.BaseOptions(model_asset_path=str(resolved_model_path)),
+            running_mode=vision.RunningMode.VIDEO,
+            output_category_mask=True,
+            output_confidence_masks=True,
+        )
+        self._mp = mp
+        self._segmenter = vision.ImageSegmenter.create_from_options(options)
+        self._segment_every_n_frames = max(1, segment_every_n_frames)
+        self._ema_alpha = float(np.clip(ema_alpha, 0.0, 1.0))
+        self._frame_index = 0
+        self._last_timestamp_ms = 0
+        self._last_masks: SegmentationMasks | None = None
+
+    def segment(self, frame_bgr: np.ndarray, detections: FaceDetections) -> SegmentationMasks:
+        self._frame_index += 1
+        if self._last_masks is not None and (self._frame_index - 1) % self._segment_every_n_frames != 0:
+            return self._with_current_protection(self._last_masks, frame_bgr.shape, detections)
+
+        timestamp_ms = max(int(time.monotonic() * 1000), self._last_timestamp_ms + 1)
+        self._last_timestamp_ms = timestamp_ms
+
+        rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        mp_image = self._mp.Image(image_format=self._mp.ImageFormat.SRGB, data=np.ascontiguousarray(rgb))
+        result = self._segmenter.segment_for_video(mp_image, timestamp_ms)
+        new_masks = masks_from_segmenter_result(result, frame_bgr.shape, detections)
+        if self._last_masks is not None:
+            new_masks = ema_masks(self._last_masks, new_masks, self._ema_alpha)
+            new_masks = self._with_current_protection(new_masks, frame_bgr.shape, detections)
+        self._last_masks = new_masks
+        return new_masks
+
+    @staticmethod
+    def _with_current_protection(
+        masks: SegmentationMasks,
+        image_shape: tuple[int, ...],
+        detections: FaceDetections,
+    ) -> SegmentationMasks:
+        protected = build_part_masks(image_shape, detections).protected
+        return SegmentationMasks(
+            head=masks.head,
+            skin=masks.skin,
+            hair=masks.hair,
+            protected=protected,
+            face_skin=masks.face_skin,
+            body_skin=masks.body_skin,
+        )
+
+
 def default_model_path() -> Path:
     return Path(__file__).resolve().parents[2] / "models" / "face_landmarker.task"
 
 
-class EffectPipeline:
-    """Applies purikura effects using face landmarks when available."""
+def default_segmenter_model_path() -> Path:
+    return Path(__file__).resolve().parents[2] / "models" / "selfie_multiclass_256x256.tflite"
 
-    def __init__(self, tracker: FaceTracker | None = None, detector: FaceTracker | None = None) -> None:
+
+class EffectPipeline:
+    """Applies purikura effects using MediaPipe face landmarks and multiclass masks."""
+
+    def __init__(
+        self,
+        tracker: FaceTracker | None = None,
+        detector: FaceTracker | None = None,
+        segmenter: HeadSegmenterProtocol | None = None,
+    ) -> None:
         self.tracker = tracker or detector or MediaPipeFaceTracker()
+        self.segmenter = segmenter or HeadSegmenter()
 
     def apply(
         self,
@@ -176,61 +315,116 @@ class EffectPipeline:
         frame_asset: FrameAsset | None = None,
     ) -> np.ndarray:
         detections = self.tracker.detect(frame_bgr)
+        masks = self.segmenter.segment(frame_bgr, detections)
         adjusted = frame_bgr.copy()
         adjusted = self._apply_face_slim(adjusted, detections, settings.face_slim * settings.purikura_intensity)
         adjusted = self._enlarge_eyes(adjusted, detections, settings.eye_enlarge * settings.purikura_intensity)
-        adjusted = self._apply_purikura_skin(adjusted, settings, detections)
+        adjusted = self._apply_purikura_skin(adjusted, settings, detections, masks)
+        adjusted = self._apply_part_refinements(adjusted, settings, detections, masks)
         adjusted = self._apply_makeup(adjusted, settings, detections)
         adjusted = self._apply_purikura_tone(adjusted, settings)
         framed = adjusted if frame_asset is None else alpha_composite_bgra(adjusted, frame_asset.image_bgra)
-        if settings.face_debug_boxes:
-            return draw_detection_debug(framed, detections)
-        return framed
+        return draw_debug_overlay(framed, detections, masks, settings.debug_overlay)
 
     @staticmethod
     def _apply_purikura_skin(
         frame_bgr: np.ndarray,
         settings: EffectSettings,
         detections: FaceDetections,
+        masks: SegmentationMasks,
+    ) -> np.ndarray:
+        intensity = settings.purikura_intensity
+        smoothing = settings.skin_smoothing
+        whitening = settings.skin_whitening
+
+        skin_mask = np.clip(masks.skin * (1.0 - masks.protected), 0.0, 1.0)
+        hair_mask = np.clip(masks.hair * (1.0 - masks.skin) * face_proximity_mask(frame_bgr.shape, detections), 0.0, 1.0)
+        if float(np.max(skin_mask)) <= 0.01 and float(np.max(hair_mask)) <= 0.01:
+            return frame_bgr
+
+        diameter = 15 + int(14 * max(smoothing, intensity))
+        if diameter % 2 == 0:
+            diameter += 1
+        smooth = cv2.bilateralFilter(frame_bgr, diameter, 120 + 56 * intensity, 120 + 56 * intensity)
+        blurred = cv2.GaussianBlur(smooth, (0, 0), sigmaX=2.0 + 2.4 * smoothing, sigmaY=2.0 + 2.4 * smoothing)
+
+        ivory = np.full_like(frame_bgr, (224, 230, 255))
+        pink_white = np.full_like(frame_bgr, (218, 222, 255))
+        whitening_target = cv2.addWeighted(blurred, 1.0 - 0.30 * whitening, ivory, 0.30 * whitening, 16 * whitening)
+        whitening_target = cv2.addWeighted(whitening_target, 1.0 - 0.08 * intensity, pink_white, 0.08 * intensity, 0)
+
+        lab = cv2.cvtColor(whitening_target, cv2.COLOR_BGR2LAB).astype(np.float32)
+        lab[:, :, 0] = np.clip(lab[:, :, 0] + 18 * whitening * intensity, 0, 255)
+        lab[:, :, 1] = np.clip(lab[:, :, 1] + 3.0 * intensity, 0, 255)
+        whitening_target = cv2.cvtColor(lab.astype(np.uint8), cv2.COLOR_LAB2BGR)
+
+        skin_strength = np.clip(skin_mask * (0.70 * smoothing + 0.36 * intensity + 0.30 * whitening), 0, 0.96)
+        result = blend_by_mask(frame_bgr, whitening_target, skin_strength)
+
+        if float(np.max(hair_mask)) > 0.01:
+            hair_target = cv2.addWeighted(result, 0.88, pink_white, 0.12, 4 * intensity)
+            hair_strength = np.clip(hair_mask * (0.08 + 0.18 * intensity), 0, 0.28)
+            result = blend_by_mask(result, hair_target, hair_strength)
+        return result
+
+    @staticmethod
+    def _apply_part_refinements(
+        frame_bgr: np.ndarray,
+        settings: EffectSettings,
+        detections: FaceDetections,
+        masks: SegmentationMasks,
     ) -> np.ndarray:
         if not detections.faces:
             return frame_bgr
 
         intensity = settings.purikura_intensity
-        smoothing = settings.skin_smoothing
-        whitening = settings.skin_whitening
-        diameter = 11 + int(10 * max(smoothing, intensity))
-        if diameter % 2 == 0:
-            diameter += 1
+        part_masks = build_part_masks(frame_bgr.shape, detections)
+        skin_available = np.clip(masks.skin * (1.0 - part_masks.protected), 0.0, 1.0)
+        result = frame_bgr.copy()
 
-        smooth = cv2.bilateralFilter(frame_bgr, diameter, 92 + 48 * intensity, 92 + 48 * intensity)
-        blurred = cv2.GaussianBlur(smooth, (0, 0), sigmaX=1.6 + 1.8 * smoothing)
-        ivory = np.full_like(frame_bgr, (218, 226, 255))
-        whitening_target = cv2.addWeighted(blurred, 1.0 - 0.22 * whitening, ivory, 0.22 * whitening, 16 * whitening)
+        cheek_mask = np.clip(part_masks.cheeks * skin_available, 0.0, 1.0)
+        if float(np.max(cheek_mask)) > 0.01:
+            cheek_smooth = cv2.bilateralFilter(result, 17, 120, 120)
+            cheek_smooth = cv2.GaussianBlur(cheek_smooth, (0, 0), sigmaX=2.0)
+            result = blend_by_mask(result, cheek_smooth, cheek_mask * (0.25 + 0.35 * settings.skin_smoothing))
+            warm = np.full_like(result, (172, 146, 255))
+            result = blend_by_mask(result, cv2.addWeighted(result, 0.72, warm, 0.28, 0), cheek_mask * settings.blush * 0.30)
 
-        lab = cv2.cvtColor(whitening_target, cv2.COLOR_BGR2LAB)
-        lab_float = lab.astype(np.float32)
-        lab_float[:, :, 0] = np.clip(lab_float[:, :, 0] + 17 * whitening * intensity, 0, 255)
-        whitening_target = cv2.cvtColor(lab_float.astype(np.uint8), cv2.COLOR_LAB2BGR)
+        nose_mask = np.clip(part_masks.nose * skin_available, 0.0, 1.0)
+        if float(np.max(nose_mask)) > 0.01:
+            lab = cv2.cvtColor(result, cv2.COLOR_BGR2LAB).astype(np.float32)
+            local_l = cv2.GaussianBlur(lab[:, :, 0], (0, 0), sigmaX=6.0)
+            lab[:, :, 0] = lab[:, :, 0] * (1.0 - nose_mask * 0.20 * intensity) + local_l * (nose_mask * 0.20 * intensity)
+            nose_target = cv2.cvtColor(np.clip(lab, 0, 255).astype(np.uint8), cv2.COLOR_LAB2BGR)
+            result = blend_by_mask(result, nose_target, nose_mask * 0.65)
 
-        mask = build_face_skin_mask(frame_bgr, detections)
-        strength = np.clip(mask * (0.58 * smoothing + 0.38 * intensity + 0.25 * whitening), 0, 0.95)
-        return blend_by_mask(frame_bgr, whitening_target, strength)
+        bridge_mask = np.clip(part_masks.nose_bridge * skin_available, 0.0, 1.0)
+        if float(np.max(bridge_mask)) > 0.01:
+            highlight = cv2.addWeighted(result, 0.80, np.full_like(result, (232, 236, 255)), 0.20, 7 * intensity)
+            result = blend_by_mask(result, highlight, bridge_mask * (0.28 + 0.25 * intensity))
+
+        forehead_chin = np.clip((part_masks.forehead + part_masks.chin) * skin_available, 0.0, 1.0)
+        if float(np.max(forehead_chin)) > 0.01:
+            smooth = cv2.bilateralFilter(result, 15, 100, 100)
+            soft = cv2.addWeighted(smooth, 0.84, np.full_like(result, (224, 228, 255)), 0.16, 5)
+            result = blend_by_mask(result, soft, forehead_chin * (0.22 + 0.34 * settings.skin_smoothing))
+
+        return result
 
     @staticmethod
     def _apply_purikura_tone(frame_bgr: np.ndarray, settings: EffectSettings) -> np.ndarray:
         intensity = settings.purikura_intensity
-        contrast = max(0.62, settings.contrast - 0.14 * intensity)
-        brightness = settings.brightness + int(38 * intensity + 16 * settings.skin_whitening)
+        contrast = max(0.60, settings.contrast - 0.17 * intensity)
+        brightness = settings.brightness + int(42 * intensity + 18 * settings.skin_whitening)
         adjusted = cv2.convertScaleAbs(frame_bgr, alpha=contrast, beta=brightness)
 
         hsv = cv2.cvtColor(adjusted, cv2.COLOR_BGR2HSV).astype(np.float32)
-        hsv[:, :, 1] = np.clip(hsv[:, :, 1] * (settings.saturation + 0.16 * intensity), 0, 255)
-        hsv[:, :, 2] = np.clip(hsv[:, :, 2] + 8 * intensity, 0, 255)
+        hsv[:, :, 1] = np.clip(hsv[:, :, 1] * (settings.saturation + 0.18 * intensity), 0, 255)
+        hsv[:, :, 2] = np.clip(hsv[:, :, 2] + 9 * intensity, 0, 255)
         adjusted = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
 
         pink_white = np.full_like(adjusted, (224, 226, 255))
-        return cv2.addWeighted(adjusted, 1.0 - 0.12 * intensity, pink_white, 0.12 * intensity, 0)
+        return cv2.addWeighted(adjusted, 1.0 - 0.14 * intensity, pink_white, 0.14 * intensity, 0)
 
     @staticmethod
     def _apply_makeup(frame_bgr: np.ndarray, settings: EffectSettings, detections: FaceDetections) -> np.ndarray:
@@ -299,6 +493,12 @@ def face_geometry_from_points(points: np.ndarray, image_shape: tuple[int, ...]) 
         face_oval=face_oval.astype(np.int32),
         left_cheek=points_for_indices(points, LEFT_CHEEK).astype(np.int32),
         right_cheek=points_for_indices(points, RIGHT_CHEEK).astype(np.int32),
+        left_brow=points_for_indices(points, LEFT_BROW).astype(np.int32),
+        right_brow=points_for_indices(points, RIGHT_BROW).astype(np.int32),
+        nose=points_for_indices(points, NOSE).astype(np.int32),
+        nose_bridge=points_for_indices(points, NOSE_BRIDGE).astype(np.int32),
+        forehead=points_for_indices(points, FOREHEAD).astype(np.int32),
+        chin=points_for_indices(points, CHIN).astype(np.int32),
         landmarks=points.astype(np.int32),
     )
 
@@ -309,16 +509,28 @@ def face_geometry_from_box(box: DetectionBox, image_shape: tuple[int, ...]) -> F
     points[:, :] = [x + w / 2, y + h / 2]
     for index, angle in zip(FACE_OVAL, np.linspace(-np.pi / 2, np.pi * 1.5, len(FACE_OVAL), endpoint=False)):
         points[index] = [x + w / 2 + np.cos(angle) * w * 0.52, y + h / 2 + np.sin(angle) * h * 0.62]
-    for index in LEFT_EYE:
-        points[index] = [x + w * 0.66, y + h * 0.42]
-    for index in RIGHT_EYE:
-        points[index] = [x + w * 0.34, y + h * 0.42]
-    for index in LIPS:
-        points[index] = [x + w * 0.5, y + h * 0.72]
+    for index, angle in zip(LEFT_EYE, np.linspace(0, np.pi * 2, len(LEFT_EYE), endpoint=False)):
+        points[index] = [x + w * 0.66 + np.cos(angle) * w * 0.09, y + h * 0.42 + np.sin(angle) * h * 0.05]
+    for index, angle in zip(RIGHT_EYE, np.linspace(0, np.pi * 2, len(RIGHT_EYE), endpoint=False)):
+        points[index] = [x + w * 0.34 + np.cos(angle) * w * 0.09, y + h * 0.42 + np.sin(angle) * h * 0.05]
+    for index, angle in zip(LIPS, np.linspace(0, np.pi * 2, len(LIPS), endpoint=False)):
+        points[index] = [x + w * 0.5 + np.cos(angle) * w * 0.14, y + h * 0.72 + np.sin(angle) * h * 0.06]
     for index in LEFT_CHEEK:
         points[index] = [x + w * 0.36, y + h * 0.64]
     for index in RIGHT_CHEEK:
         points[index] = [x + w * 0.64, y + h * 0.64]
+    for index, offset in zip(LEFT_BROW, np.linspace(-0.12, 0.12, len(LEFT_BROW))):
+        points[index] = [x + w * (0.67 + offset), y + h * 0.31]
+    for index, offset in zip(RIGHT_BROW, np.linspace(-0.12, 0.12, len(RIGHT_BROW))):
+        points[index] = [x + w * (0.33 + offset), y + h * 0.31]
+    for index, angle in zip(NOSE, np.linspace(0, np.pi * 2, len(NOSE), endpoint=False)):
+        points[index] = [x + w * 0.5 + np.cos(angle) * w * 0.12, y + h * 0.55 + np.sin(angle) * h * 0.14]
+    for index, offset in zip(NOSE_BRIDGE, np.linspace(-0.18, 0.18, len(NOSE_BRIDGE))):
+        points[index] = [x + w * 0.5, y + h * (0.39 + offset)]
+    for index, offset in zip(FOREHEAD, np.linspace(-0.20, 0.20, len(FOREHEAD))):
+        points[index] = [x + w * (0.5 + offset), y + h * 0.18]
+    for index, offset in zip(CHIN, np.linspace(-0.22, 0.22, len(CHIN))):
+        points[index] = [x + w * (0.5 + offset), y + h * 0.86]
     return face_geometry_from_points(points, image_shape)
 
 
@@ -344,27 +556,228 @@ def box_from_points(points: np.ndarray, image_shape: tuple[int, ...], padding: f
     ).clipped(image_shape)
 
 
-def build_face_skin_mask(frame_bgr: np.ndarray, detections: FaceDetections | tuple[DetectionBox, ...]) -> np.ndarray:
-    face_mask = np.zeros(frame_bgr.shape[:2], dtype=np.uint8)
-    exclusion_mask = np.zeros(frame_bgr.shape[:2], dtype=np.uint8)
-    if isinstance(detections, tuple):
-        faces = tuple(face_geometry_from_box(face, frame_bgr.shape) for face in detections)
+def empty_masks(image_shape: tuple[int, ...]) -> SegmentationMasks:
+    height, width = image_shape[:2]
+    zero = np.zeros((height, width), dtype=np.float32)
+    return SegmentationMasks(
+        head=zero.copy(),
+        skin=zero.copy(),
+        hair=zero.copy(),
+        protected=zero.copy(),
+        face_skin=zero.copy(),
+        body_skin=zero.copy(),
+    )
+
+
+def masks_from_segmenter_result(
+    result: object,
+    image_shape: tuple[int, ...],
+    detections: FaceDetections,
+) -> SegmentationMasks:
+    face_skin = confidence_or_category_mask(result, SEG_FACE_SKIN, image_shape)
+    body_skin = confidence_or_category_mask(result, SEG_BODY_SKIN, image_shape)
+    hair = confidence_or_category_mask(result, SEG_HAIR, image_shape)
+    proximity = face_proximity_mask(image_shape, detections)
+    if detections.faces:
+        body_skin_near = body_skin * proximity
+        hair_near = hair * proximity
     else:
-        faces = detections.faces
+        body_skin_near = body_skin
+        hair_near = hair
 
-    for face in faces:
-        cv2.fillConvexPoly(face_mask, face.face_oval.astype(np.int32), 255)
-        for part in (face.left_eye, face.right_eye, face.lips):
-            expanded = expand_box(part, frame_bgr.shape, scale_x=1.55, scale_y=1.7)
-            cv2.ellipse(exclusion_mask, ellipse_from_box(expanded), 255, -1)
+    face_skin = smooth_mask(face_skin, sigma=2.0)
+    body_skin_near = smooth_mask(body_skin_near, sigma=2.5)
+    hair_near = smooth_mask(hair_near, sigma=2.5)
+    protected = build_part_masks(image_shape, detections).protected
+    skin = np.clip(np.maximum(face_skin, body_skin_near), 0.0, 1.0)
+    head = np.clip(np.maximum(skin, hair_near), 0.0, 1.0)
+    head = np.maximum(smooth_mask(head, sigma=1.5), hair_near)
+    return SegmentationMasks(
+        head=np.clip(head, 0.0, 1.0).astype(np.float32),
+        skin=smooth_mask(skin, sigma=1.5),
+        hair=hair_near,
+        protected=protected,
+        face_skin=face_skin,
+        body_skin=body_skin_near,
+    )
 
-    ycrcb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2YCrCb)
-    broad_skin = cv2.inRange(ycrcb, np.array([0, 125, 65], dtype=np.uint8), np.array([255, 185, 145], dtype=np.uint8))
-    base = cv2.bitwise_and(face_mask, cv2.bitwise_or(broad_skin, cv2.convertScaleAbs(face_mask, alpha=0.68)))
-    base = cv2.bitwise_and(base, cv2.bitwise_not(exclusion_mask))
-    base = cv2.GaussianBlur(base, (0, 0), sigmaX=10, sigmaY=10)
-    base = cv2.bitwise_and(base, face_mask)
-    return base.astype(np.float32) / 255.0
+
+def confidence_or_category_mask(result: object, category: int, image_shape: tuple[int, ...]) -> np.ndarray:
+    confidence_masks = getattr(result, "confidence_masks", None)
+    if confidence_masks and len(confidence_masks) > category:
+        mask = confidence_masks[category].numpy_view()
+        return resize_mask(mask, image_shape, interpolation=cv2.INTER_LINEAR)
+
+    category_mask = getattr(result, "category_mask", None)
+    if category_mask is None:
+        raise RuntimeError("ImageSegmenter did not return category or confidence masks")
+    mask = np.squeeze(category_mask.numpy_view())
+    return resize_mask((mask == category).astype(np.float32), image_shape, interpolation=cv2.INTER_NEAREST)
+
+
+def resize_mask(mask: np.ndarray, image_shape: tuple[int, ...], *, interpolation: int) -> np.ndarray:
+    height, width = image_shape[:2]
+    mask = np.squeeze(mask).astype(np.float32)
+    if mask.shape != (height, width):
+        mask = cv2.resize(mask, (width, height), interpolation=interpolation)
+    return np.clip(mask, 0.0, 1.0).astype(np.float32)
+
+
+def ema_masks(previous: SegmentationMasks, current: SegmentationMasks, alpha: float) -> SegmentationMasks:
+    def mix(old: np.ndarray, new: np.ndarray) -> np.ndarray:
+        return np.clip(old * (1.0 - alpha) + new * alpha, 0.0, 1.0).astype(np.float32)
+
+    return SegmentationMasks(
+        head=mix(previous.head, current.head),
+        skin=mix(previous.skin, current.skin),
+        hair=mix(previous.hair, current.hair),
+        protected=current.protected,
+        face_skin=mix(previous.face_skin, current.face_skin),
+        body_skin=mix(previous.body_skin, current.body_skin),
+    )
+
+
+def build_part_masks(image_shape: tuple[int, ...], detections: FaceDetections) -> PartMasks:
+    height, width = image_shape[:2]
+    cheeks = np.zeros((height, width), dtype=np.float32)
+    nose = np.zeros((height, width), dtype=np.float32)
+    nose_bridge = np.zeros((height, width), dtype=np.float32)
+    forehead = np.zeros((height, width), dtype=np.float32)
+    chin = np.zeros((height, width), dtype=np.float32)
+    brows = np.zeros((height, width), dtype=np.float32)
+    protected = np.zeros((height, width), dtype=np.float32)
+
+    for face in detections.faces:
+        cheeks = np.maximum(cheeks, cheek_masks(image_shape, face))
+        nose = np.maximum(nose, polygon_mask(image_shape, face.nose, blur_sigma=3.0))
+        nose_bridge = np.maximum(nose_bridge, line_mask(image_shape, face.nose_bridge, max(2, face.bbox.width // 36), blur_sigma=3.0))
+        forehead = np.maximum(forehead, forehead_mask(image_shape, face))
+        chin = np.maximum(chin, chin_mask(image_shape, face))
+        brows = np.maximum(brows, polygon_mask(image_shape, face.left_brow, blur_sigma=2.0))
+        brows = np.maximum(brows, polygon_mask(image_shape, face.right_brow, blur_sigma=2.0))
+
+        for box in (face.left_eye, face.right_eye):
+            expanded = expand_box(box, image_shape, scale_x=1.75, scale_y=1.95)
+            eye = np.zeros((height, width), dtype=np.uint8)
+            cv2.ellipse(eye, ellipse_from_box(expanded), 255, -1)
+            protected = np.maximum(protected, smooth_mask(eye.astype(np.float32) / 255.0, sigma=3.0))
+        lip_box = expand_box(face.lips, image_shape, scale_x=1.36, scale_y=1.52)
+        lip = np.zeros((height, width), dtype=np.uint8)
+        cv2.ellipse(lip, ellipse_from_box(lip_box), 255, -1)
+        protected = np.maximum(protected, smooth_mask(lip.astype(np.float32) / 255.0, sigma=3.0))
+
+    protected = np.clip(np.maximum(protected, brows), 0.0, 1.0).astype(np.float32)
+    return PartMasks(
+        cheeks=cheeks,
+        nose=nose,
+        nose_bridge=nose_bridge,
+        forehead=forehead,
+        chin=chin,
+        brows=brows,
+        protected=protected,
+    )
+
+
+def build_face_skin_mask(frame_bgr: np.ndarray, detections: FaceDetections | tuple[DetectionBox, ...]) -> np.ndarray:
+    if isinstance(detections, tuple):
+        face_detections = FaceDetections(tuple(face_geometry_from_box(face, frame_bgr.shape) for face in detections))
+    else:
+        face_detections = detections
+    face_mask = np.zeros(frame_bgr.shape[:2], dtype=np.float32)
+    for face in face_detections.faces:
+        face_mask = np.maximum(face_mask, polygon_mask(frame_bgr.shape, face.face_oval, blur_sigma=6.0))
+    protected = build_part_masks(frame_bgr.shape, face_detections).protected
+    return np.clip(face_mask * (1.0 - protected), 0.0, 1.0)
+
+
+def face_proximity_mask(image_shape: tuple[int, ...], detections: FaceDetections) -> np.ndarray:
+    height, width = image_shape[:2]
+    if not detections.faces:
+        return np.ones((height, width), dtype=np.float32)
+    mask = np.zeros((height, width), dtype=np.uint8)
+    for face in detections.faces:
+        x1 = int(face.bbox.x - face.bbox.width * 0.45)
+        y1 = int(face.bbox.y - face.bbox.height * 0.45)
+        x2 = int(face.bbox.x + face.bbox.width * 1.45)
+        y2 = int(face.bbox.y + face.bbox.height * 1.32)
+        roi = DetectionBox(x1, y1, x2 - x1, y2 - y1).clipped(image_shape)
+        cv2.rectangle(mask, (roi.x, roi.y), (roi.x + roi.width, roi.y + roi.height), 255, -1)
+        cv2.ellipse(
+            mask,
+            (int(face.bbox.center[0]), int(face.bbox.y + face.bbox.height * 0.45)),
+            (max(1, int(face.bbox.width * 0.86)), max(1, int(face.bbox.height * 0.92))),
+            0,
+            0,
+            360,
+            255,
+            -1,
+        )
+    return smooth_mask(mask.astype(np.float32) / 255.0, sigma=8.0)
+
+
+def polygon_mask(image_shape: tuple[int, ...], points: np.ndarray, *, blur_sigma: float) -> np.ndarray:
+    height, width = image_shape[:2]
+    mask = np.zeros((height, width), dtype=np.uint8)
+    if len(points) >= 3:
+        hull = cv2.convexHull(points.astype(np.int32))
+        cv2.fillConvexPoly(mask, hull, 255)
+    elif len(points) == 2:
+        cv2.line(mask, tuple(points[0].astype(int)), tuple(points[1].astype(int)), 255, 2)
+    elif len(points) == 1:
+        cv2.circle(mask, tuple(points[0].astype(int)), 2, 255, -1)
+    return smooth_mask(mask.astype(np.float32) / 255.0, sigma=blur_sigma)
+
+
+def line_mask(image_shape: tuple[int, ...], points: np.ndarray, thickness: int, *, blur_sigma: float) -> np.ndarray:
+    height, width = image_shape[:2]
+    mask = np.zeros((height, width), dtype=np.uint8)
+    if len(points) >= 2:
+        cv2.polylines(mask, [points.astype(np.int32)], False, 255, thickness=thickness, lineType=cv2.LINE_AA)
+    return smooth_mask(mask.astype(np.float32) / 255.0, sigma=blur_sigma)
+
+
+def cheek_masks(image_shape: tuple[int, ...], face: FaceGeometry) -> np.ndarray:
+    height, width = image_shape[:2]
+    mask = np.zeros((height, width), dtype=np.uint8)
+    axes = (max(5, face.bbox.width // 7), max(4, face.bbox.height // 12))
+    for cheek in (face.left_cheek, face.right_cheek):
+        center = tuple(map(int, point_center(cheek)))
+        cv2.ellipse(mask, center, axes, 0, 0, 360, 255, -1)
+    return smooth_mask(mask.astype(np.float32) / 255.0, sigma=6.0)
+
+
+def forehead_mask(image_shape: tuple[int, ...], face: FaceGeometry) -> np.ndarray:
+    height, width = image_shape[:2]
+    raw = np.zeros((height, width), dtype=np.uint8)
+    center = (int(face.bbox.center[0]), int(face.bbox.y + face.bbox.height * 0.24))
+    axes = (max(5, int(face.bbox.width * 0.28)), max(4, int(face.bbox.height * 0.10)))
+    cv2.ellipse(raw, center, axes, 0, 0, 360, 255, -1)
+    ellipse = smooth_mask(raw.astype(np.float32) / 255.0, sigma=4.0)
+    if len(face.forehead) >= 3:
+        base = np.maximum(ellipse, polygon_mask(image_shape, face.forehead, blur_sigma=5.0))
+    else:
+        base = ellipse
+    return base
+
+
+def chin_mask(image_shape: tuple[int, ...], face: FaceGeometry) -> np.ndarray:
+    height, width = image_shape[:2]
+    raw = np.zeros((height, width), dtype=np.uint8)
+    center = (int(face.bbox.center[0]), int(face.bbox.y + face.bbox.height * 0.84))
+    axes = (max(5, int(face.bbox.width * 0.26)), max(4, int(face.bbox.height * 0.11)))
+    cv2.ellipse(raw, center, axes, 0, 0, 360, 255, -1)
+    ellipse = smooth_mask(raw.astype(np.float32) / 255.0, sigma=4.0)
+    if len(face.chin) >= 3:
+        base = np.maximum(ellipse, polygon_mask(image_shape, face.chin, blur_sigma=5.0))
+    else:
+        base = ellipse
+    return base
+
+
+def smooth_mask(mask: np.ndarray, *, sigma: float) -> np.ndarray:
+    if sigma > 0:
+        mask = cv2.GaussianBlur(mask.astype(np.float32), (0, 0), sigmaX=sigma, sigmaY=sigma)
+    return np.clip(mask, 0.0, 1.0).astype(np.float32)
 
 
 def apply_lip_tint(frame_bgr: np.ndarray, face: FaceGeometry, strength: float) -> np.ndarray:
@@ -495,9 +908,66 @@ def local_translate(
     return result
 
 
-def draw_detection_debug(frame_bgr: np.ndarray, detections: FaceDetections) -> np.ndarray:
+def draw_debug_overlay(
+    frame_bgr: np.ndarray,
+    detections: FaceDetections,
+    masks: SegmentationMasks,
+    mode: str,
+) -> np.ndarray:
+    if mode == "off":
+        return frame_bgr
     result = frame_bgr.copy()
-    draw_debug_label(result, f"faces={len(detections.faces)}")
+    if mode in {"masks", "all"}:
+        result = draw_mask_debug(result, masks)
+    if mode in {"parts", "all"}:
+        result = draw_part_debug(result, detections)
+    if mode in {"landmarks", "all"}:
+        result = draw_landmark_debug(result, detections)
+    draw_debug_label(result, f"faces={len(detections.faces)} overlay={mode}")
+    return result
+
+
+def draw_detection_debug(frame_bgr: np.ndarray, detections: FaceDetections) -> np.ndarray:
+    return draw_debug_overlay(frame_bgr, detections, empty_masks(frame_bgr.shape), "landmarks")
+
+
+def draw_mask_debug(frame_bgr: np.ndarray, masks: SegmentationMasks) -> np.ndarray:
+    result = frame_bgr.copy()
+    overlays = (
+        (masks.head, (0, 220, 255), 0.25),
+        (masks.skin, (0, 255, 80), 0.32),
+        (masks.hair, (255, 120, 0), 0.24),
+        (masks.protected, (255, 0, 255), 0.45),
+    )
+    for mask, color, strength in overlays:
+        color_frame = np.full_like(result, color)
+        result = blend_by_mask(result, color_frame, np.clip(mask * strength, 0.0, 1.0))
+    return result
+
+
+def draw_part_debug(frame_bgr: np.ndarray, detections: FaceDetections) -> np.ndarray:
+    result = frame_bgr.copy()
+    for face in detections.faces:
+        for label, points, color in (
+            ("nose", face.nose, (0, 255, 255)),
+            ("forehead", face.forehead, (255, 180, 0)),
+            ("chin", face.chin, (80, 220, 255)),
+            ("L brow", face.left_brow, (255, 0, 255)),
+            ("R brow", face.right_brow, (255, 0, 255)),
+        ):
+            if len(points) >= 2:
+                cv2.polylines(result, [cv2.convexHull(points.astype(np.int32))], True, color, 1)
+            center = point_center(points)
+            cv2.putText(result, label, (int(center[0]), int(center[1])), cv2.FONT_HERSHEY_SIMPLEX, 0.42, color, 1)
+        for label, cheek in (("L cheek", face.left_cheek), ("R cheek", face.right_cheek)):
+            center = tuple(map(int, point_center(cheek)))
+            cv2.circle(result, center, max(4, face.bbox.width // 11), (120, 120, 255), 1)
+            cv2.putText(result, label, center, cv2.FONT_HERSHEY_SIMPLEX, 0.40, (120, 120, 255), 1)
+    return result
+
+
+def draw_landmark_debug(frame_bgr: np.ndarray, detections: FaceDetections) -> np.ndarray:
+    result = frame_bgr.copy()
     for face in detections.faces:
         cv2.rectangle(result, (face.bbox.x, face.bbox.y), (face.bbox.x + face.bbox.width, face.bbox.y + face.bbox.height), (0, 255, 255), 2)
         cv2.polylines(result, [face.face_oval.astype(np.int32)], isClosed=True, color=(0, 220, 255), thickness=2)
@@ -514,7 +984,8 @@ def draw_detection_debug(frame_bgr: np.ndarray, detections: FaceDetections) -> n
 
 
 def draw_debug_label(frame_bgr: np.ndarray, text: str) -> None:
-    cv2.rectangle(frame_bgr, (8, 8), (172, 44), (0, 0, 0), -1)
+    width = min(frame_bgr.shape[1] - 1, max(172, 20 + len(text) * 14))
+    cv2.rectangle(frame_bgr, (8, 8), (width, 44), (0, 0, 0), -1)
     cv2.putText(frame_bgr, text, (16, 33), cv2.FONT_HERSHEY_SIMPLEX, 0.78, (0, 255, 255), 2)
 
 

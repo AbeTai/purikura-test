@@ -17,7 +17,7 @@ const controls = {
   brightness: document.querySelector("#brightness"),
   contrast: document.querySelector("#contrast"),
   saturation: document.querySelector("#saturation"),
-  face_debug_boxes: document.querySelector("#face-debug-boxes"),
+  debug_overlay: document.querySelector("#debug-overlay"),
 };
 
 function setStatus(message) {
@@ -69,7 +69,7 @@ async function saveEffects() {
     brightness: Number(controls.brightness.value),
     contrast: Number(controls.contrast.value),
     saturation: Number(controls.saturation.value),
-    face_debug_boxes: controls.face_debug_boxes.checked,
+    debug_overlay: controls.debug_overlay.value,
   };
   await requestJson("/api/effects", {
     method: "PUT",
@@ -110,7 +110,7 @@ async function loadCaptures() {
 }
 
 for (const input of Object.values(controls)) {
-  const eventName = input.type === "checkbox" ? "change" : "input";
+  const eventName = input.tagName === "SELECT" ? "change" : "input";
   input.addEventListener(eventName, async () => {
     try {
       await saveEffects();

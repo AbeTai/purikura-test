@@ -6,7 +6,8 @@ FastAPI + OpenCV based prototype for realtime purikura-style camera effects.
 
 - Realtime MJPEG browser preview.
 - Camera abstraction for Mac built-in cameras now and USB cameras later.
-- Skin smoothing, brightness, contrast, and saturation controls.
+- MediaPipe Face Landmarker + SelfieMulticlass based purikura effects.
+- Skin smoothing, whitening, eye enlargement, face slim, makeup, tone, and debug overlay controls.
 - Transparent PNG frame upload and alpha compositing.
 - Capture persistence in SQLite through a repository interface.
 - Browser UI that can be shown on the Mac display or a TV connected over HDMI.
@@ -34,4 +35,5 @@ uv run pytest
 - The initial camera source uses OpenCV camera indexes. Built-in cameras are usually index `0`; USB cameras typically appear as additional indexes.
 - Captures are stored as JPEG blobs in `data/purikura.sqlite3` by default.
 - Uploaded frames are stored as PNG blobs and resized to the active preview frame before compositing.
-- The MediaPipe face landmarker model is downloaded to `models/face_landmarker.task` and is ignored by git.
+- `scripts/download_models.py` downloads `models/face_landmarker.task` and `models/selfie_multiclass_256x256.tflite`; both are ignored by git.
+- Debug overlay modes are `Off`, `Landmarks`, `Masks`, `Parts`, and `All`.
