@@ -21,6 +21,7 @@ class EncodedFrame:
     mime: str
     width: int
     height: int
+    settings: EffectSettings
 
 
 @dataclass(frozen=True)
@@ -45,6 +46,7 @@ class PurikuraRuntime:
         self.current_frame_id: int | None = None
         self._frame_asset: FrameAsset | None = None
         self._pending_frame: FramePacket | None = None
+        self._latest_raw_packet: FramePacket | None = None
         self._latest_processed: np.ndarray | None = None
         self._latest_jpeg: bytes | None = None
         self._next_frame_id = 0
@@ -52,6 +54,7 @@ class PurikuraRuntime:
         self._performance = PerformanceSummary()
         self._lock = threading.RLock()
         self._pipeline_lock = threading.Lock()
+        self._pipeline_apply_lock = threading.Lock()
         self._stop = threading.Event()
         self._camera_thread: threading.Thread | None = None
         self._processor_thread: threading.Thread | None = None
@@ -134,15 +137,28 @@ class PurikuraRuntime:
 
     def capture_current(self) -> EncodedFrame | None:
         with self._lock:
-            frame = None if self._latest_processed is None else self._latest_processed.copy()
-        if frame is None:
+            packet = self._latest_raw_packet
+            settings = self.settings
+            frame_asset = self._frame_asset
+        if packet is None:
             return None
+
+        capture_settings = settings.model_copy(update={"processing_profile": "quality"})
+        pipeline = self._ensure_pipeline()
+        with self._pipeline_apply_lock:
+            frame = pipeline.apply(packet.frame.copy(), capture_settings, frame_asset)
 
         ok, encoded = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
         if not ok:
             return None
         height, width = frame.shape[:2]
-        return EncodedFrame(blob=encoded.tobytes(), mime="image/jpeg", width=width, height=height)
+        return EncodedFrame(
+            blob=encoded.tobytes(),
+            mime="image/jpeg",
+            width=width,
+            height=height,
+            settings=capture_settings,
+        )
 
     def _read_loop(self) -> None:
         while not self._stop.is_set():
@@ -157,7 +173,9 @@ class PurikuraRuntime:
                 self._next_frame_id += 1
                 self._latest_raw_frame_id = self._next_frame_id
                 self._performance.latest_raw_frame_id = self._latest_raw_frame_id
-                self._pending_frame = FramePacket(id=self._next_frame_id, captured_at=captured_at, frame=raw)
+                packet = FramePacket(id=self._next_frame_id, captured_at=captured_at, frame=raw)
+                self._latest_raw_packet = packet
+                self._pending_frame = packet
             time.sleep(0.001)
 
     def _process_loop(self) -> None:
@@ -173,10 +191,11 @@ class PurikuraRuntime:
 
             started = time.perf_counter()
             pipeline = self._ensure_pipeline()
-            processed = pipeline.apply(packet.frame, settings, frame_asset)
+            with self._pipeline_apply_lock:
+                processed = pipeline.apply(packet.frame, settings, frame_asset)
+                motion_factor = pipeline.last_motion_ratio
             processed_at = time.perf_counter()
             processing_ms = (processed_at - started) * 1000
-            motion_factor = pipeline.last_motion_ratio
             with self._lock:
                 if not self._is_packet_fresh_for_publish(packet, settings):
                     self._performance.discarded_processed_frames += 1

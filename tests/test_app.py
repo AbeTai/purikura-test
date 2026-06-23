@@ -1,13 +1,14 @@
 import io
+import time
 
 import numpy as np
 from fastapi.testclient import TestClient
 from PIL import Image
 
-from purikura_test.api_models import CameraInfo
+from purikura_test.api_models import CameraInfo, EffectSettings
 from purikura_test.app import create_app
-from purikura_test.repository import CaptureRepository
-from purikura_test.runtime import PurikuraRuntime
+from purikura_test.repository import CaptureRecord, CaptureRepository
+from purikura_test.runtime import FramePacket, PurikuraRuntime
 
 
 def png_bytes() -> bytes:
@@ -17,10 +18,27 @@ def png_bytes() -> bytes:
     return output.getvalue()
 
 
+class PassthroughPipeline:
+    last_motion_ratio = 0.0
+
+    def __init__(self) -> None:
+        self.settings: list[EffectSettings] = []
+
+    def apply(self, frame_bgr: np.ndarray, settings: EffectSettings, frame_asset=None) -> np.ndarray:
+        self.settings.append(settings)
+        return frame_bgr.copy()
+
+
 def test_app_core_api_flow(monkeypatch) -> None:
     repository = CaptureRepository("sqlite:///:memory:")
-    runtime = PurikuraRuntime(repository)
-    runtime._latest_processed = np.full((12, 16, 3), 120, dtype=np.uint8)
+    pipeline = PassthroughPipeline()
+    runtime = PurikuraRuntime(repository, pipeline=pipeline)
+    runtime._latest_raw_packet = FramePacket(
+        id=1,
+        captured_at=time.perf_counter(),
+        frame=np.full((12, 16, 3), 120, dtype=np.uint8),
+    )
+    runtime._latest_raw_frame_id = 1
     app = create_app(runtime=runtime, start_camera=False)
 
     monkeypatch.setattr(
@@ -120,10 +138,16 @@ def test_app_core_api_flow(monkeypatch) -> None:
         captured = client.post("/api/captures")
         assert captured.status_code == 200
         capture_id = captured.json()["id"]
+        assert pipeline.settings[-1].processing_profile == "quality"
 
         captures = client.get("/api/captures")
         assert captures.status_code == 200
         assert captures.json()[0]["id"] == capture_id
+
+        with repository.session() as session:
+            record = session.get(CaptureRecord, capture_id)
+            assert record is not None
+            assert '"processing_profile":"quality"' in record.effect_settings_json
 
         image = client.get(f"/api/captures/{capture_id}/image")
         assert image.status_code == 200

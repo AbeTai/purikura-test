@@ -129,10 +129,10 @@ def create_app(
     def create_capture() -> CaptureCreated:
         encoded = app_runtime.capture_current()
         if encoded is None:
-            raise HTTPException(status_code=409, detail="No processed camera frame is available yet")
+            raise HTTPException(status_code=409, detail="No raw camera frame is available yet")
         record = repository.add_capture(
             camera_id=app_runtime.camera_id,
-            settings=app_runtime.settings,
+            settings=encoded.settings,
             frame_id=app_runtime.current_frame_id,
             image_blob=encoded.blob,
             image_mime=encoded.mime,

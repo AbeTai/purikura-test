@@ -63,6 +63,7 @@
 - Face Landmarkerの検出0件時キャッシュTTLは100ms。
 - Fast previewでは顔ランドマークを毎フレーム更新している。
 - Fast previewではmotionに応じてエフェクト強度を減衰する。
+- 撮影保存では最新rawフレームを固定し、`processing_profile="quality"` にした設定で再処理してDBへ保存する。
 
 残る課題:
 
@@ -70,7 +71,7 @@
 - `landmark_age_ms` と `mask_age_ms` をまだ直接測れていない。
 - Segmenter maskは平行移動のみで、回転、スケール、顔向き変化には弱い。
 - ブラウザ側ではframe idを見て古いフレームを捨てられない。
-- previewとcaptureの品質分離が不十分な場合、previewを軽くすると保存画質も下がる。
+- DB metadataには現在、撮影時Quality設定は残るが、preview時のprofileは別フィールドとしては残していない。
 
 ## 重要な判断基準
 
@@ -744,6 +745,12 @@ OpenCV/NumPyとの往復転送が増えると逆に遅くなります。
 受け入れ基準:
 
 - preview設定を軽くしても、保存画像はQuality相当で残る。
+
+現状:
+
+- 最新raw frameの保持とcapture時Quality再処理は実装済み。
+- DBには撮影時のQuality設定を保存済み。
+- preview profileを別フィールドとして保存する部分は未実装。
 
 ### Step 3: motion時の厳格制御
 
