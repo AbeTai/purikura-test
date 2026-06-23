@@ -7,6 +7,7 @@ from pydantic import ValidationError
 
 from purikura_test.api_models import EffectSettings
 from purikura_test.effects import (
+    AdaptiveProcessWidthController,
     DetectionBox,
     EffectPipeline,
     FACE_OVAL,
@@ -16,6 +17,7 @@ from purikura_test.effects import (
     SEGMENT_MEDIUM_MOTION_RATIO,
     SEGMENT_MODERATE_EVERY_N_FRAMES,
     FaceDetections,
+    FastEffectPipeline,
     FrameAsset,
     RIGHT_EYE,
     SegmentationMasks,
@@ -64,6 +66,15 @@ class StaticSegmenter:
 
     def segment(self, frame_bgr: np.ndarray, detections: FaceDetections) -> SegmentationMasks:
         return self.masks
+
+
+class ResettableSegmenter(StaticSegmenter):
+    def __init__(self, masks: SegmentationMasks) -> None:
+        super().__init__(masks)
+        self.reset_calls = 0
+
+    def reset_cache(self) -> None:
+        self.reset_calls += 1
 
 
 class DynamicSegmenter:
@@ -307,6 +318,16 @@ def test_effect_settings_validation_bounds() -> None:
         EffectSettings(lip_gloss=0.5)
 
 
+def test_default_doll_mix_prioritizes_eyes_hair_and_lips_over_blush_and_glow() -> None:
+    settings = EffectSettings()
+
+    assert settings.eye_enlarge == 0.34
+    assert settings.doll_intensity == 0.74
+    assert settings.iris_gloss > settings.cheek_gradient
+    assert settings.hair_silk > settings.soft_glow
+    assert settings.lip_gloss > settings.cheek_gradient
+
+
 def test_face_skin_mask_is_limited_to_detected_face_and_excludes_parts() -> None:
     frame = np.zeros((160, 120, 3), dtype=np.uint8)
     frame[:, :] = [90, 120, 170]
@@ -415,6 +436,40 @@ def test_segment_interval_for_motion_adapts_to_face_movement() -> None:
     assert segment_interval_for_motion(0.05, 8) == 2
     assert segment_interval_for_motion(0.11, 8) == 1
     assert segment_interval_for_motion(float("inf"), 8) == 1
+
+
+def test_adaptive_process_width_uses_hysteresis_and_recovers_gradually() -> None:
+    controller = AdaptiveProcessWidthController(overload_samples=2, recovery_seconds=1.0)
+
+    assert controller.current_width == 640
+    assert not controller.observe(processing_ms=90, frame_age_ms=110, now=0.0)
+    assert controller.observe(processing_ms=90, frame_age_ms=110, now=0.1)
+    assert controller.current_width == 512
+    assert controller.observe(processing_ms=130, frame_age_ms=150, now=0.2)
+    assert controller.current_width == 448
+
+    assert not controller.observe(processing_ms=55, frame_age_ms=80, now=1.0)
+    assert controller.observe(processing_ms=55, frame_age_ms=80, now=2.1)
+    assert controller.current_width == 512
+    assert controller.observe(processing_ms=55, frame_age_ms=80, now=3.2)
+    assert controller.current_width == 640
+
+
+def test_fast_pipeline_resets_segment_cache_when_process_width_changes() -> None:
+    frame = np.zeros((160, 120, 3), dtype=np.uint8)
+    detections = synthetic_face(frame.shape)
+    segmenter = ResettableSegmenter(synthetic_masks(frame.shape, detections))
+    pipeline = FastEffectPipeline(
+        tracker=StaticTracker(detections),
+        segmenter=segmenter,
+        width_controller=AdaptiveProcessWidthController(overload_samples=1),
+    )
+
+    changed = pipeline.record_performance(processing_ms=130, frame_age_ms=190, discarded=False)
+
+    assert changed
+    assert pipeline.process_width == 512
+    assert segmenter.reset_calls == 1
 
 
 def test_head_segmenter_refreshes_early_for_moderate_motion() -> None:

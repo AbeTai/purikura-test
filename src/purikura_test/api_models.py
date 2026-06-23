@@ -22,9 +22,9 @@ class EffectSettings(BaseModel):
     processing_profile: Literal["quality", "fast"] = "fast"
     skin_smoothing: float = Field(default=0.78, ge=0.0, le=1.0)
     purikura_intensity: float = Field(default=0.86, ge=0.0, le=1.0)
-    eye_enlarge: float = Field(default=0.30, ge=0.0, le=0.6)
-    face_slim: float = Field(default=0.30, ge=0.0, le=0.6)
-    doll_intensity: float = Field(default=0.65, ge=0.0, le=1.0)
+    eye_enlarge: float = Field(default=0.34, ge=0.0, le=0.6)
+    face_slim: float = Field(default=0.32, ge=0.0, le=0.6)
+    doll_intensity: float = Field(default=0.74, ge=0.0, le=1.0)
     background_high_key: float = Field(default=0.35, ge=0.0, le=1.0)
     debug_overlay: Literal["off", "landmarks", "masks", "parts", "all"] = "off"
 
@@ -66,7 +66,7 @@ class EffectSettings(BaseModel):
 
     @property
     def eye_roundness(self) -> float:
-        return self._clamp01(0.15 + 0.62 * self.doll_intensity)
+        return self._clamp01(0.24 + 0.68 * self.doll_intensity)
 
     @property
     def eye_liner(self) -> float:
@@ -82,23 +82,23 @@ class EffectSettings(BaseModel):
 
     @property
     def iris_gloss(self) -> float:
-        return self._clamp01(0.18 + 0.65 * self.doll_intensity)
+        return self._clamp01(0.30 + 0.66 * self.doll_intensity)
 
     @property
     def cheek_gradient(self) -> float:
-        return self._clamp01(0.15 + 0.54 * self.doll_intensity)
+        return self._clamp01(0.10 + 0.40 * self.doll_intensity)
 
     @property
     def lip_gloss(self) -> float:
-        return self._clamp01(0.17 + 0.58 * self.doll_intensity)
+        return self._clamp01(0.24 + 0.62 * self.doll_intensity)
 
     @property
     def hair_silk(self) -> float:
-        return self._clamp01(0.08 + 0.42 * self.doll_intensity)
+        return self._clamp01(0.16 + 0.52 * self.doll_intensity)
 
     @property
     def soft_glow(self) -> float:
-        return self._clamp01(0.12 + 0.51 * self.doll_intensity)
+        return self._clamp01(0.08 + 0.34 * self.doll_intensity)
 
 
 class FrameSummary(BaseModel):
@@ -143,4 +143,5 @@ class PerformanceSummary(BaseModel):
     preview_stall_ms: float = 0.0
     published_frame_id: int = 0
     latest_raw_frame_id: int = 0
+    process_width: int = 0
     profile: Literal["quality", "fast"] = "quality"

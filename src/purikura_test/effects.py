@@ -79,6 +79,14 @@ SEG_OTHERS = 5
 SEGMENT_EVERY_N_FRAMES = 4
 MASK_EMA_ALPHA = 0.65
 FAST_PROCESS_WIDTH = 640
+FAST_PROCESS_WIDTH_LEVELS = (640, 512, 448)
+FAST_OVERLOAD_PROCESSING_MS = 80.0
+FAST_OVERLOAD_FRAME_AGE_MS = 120.0
+FAST_SEVERE_PROCESSING_MS = 120.0
+FAST_SEVERE_FRAME_AGE_MS = 180.0
+FAST_RECOVERY_PROCESSING_MS = 68.0
+FAST_RECOVERY_FRAME_AGE_MS = 100.0
+FAST_RECOVERY_SECONDS = 1.0
 SEGMENT_MEDIUM_MOTION_RATIO = 0.04
 MASK_MOTION_RESET_RATIO = 0.10
 SEGMENT_MAX_REUSE_AGE_MS = 150.0
@@ -168,6 +176,80 @@ class PartMasks:
     chin: np.ndarray
     brows: np.ndarray
     protected: np.ndarray
+
+
+class AdaptiveProcessWidthController:
+    """Adjusts preview resolution with hysteresis to avoid visible oscillation."""
+
+    def __init__(
+        self,
+        widths: tuple[int, ...] = FAST_PROCESS_WIDTH_LEVELS,
+        *,
+        overload_samples: int = 2,
+        recovery_seconds: float = FAST_RECOVERY_SECONDS,
+    ) -> None:
+        if not widths or any(width <= 0 for width in widths):
+            raise ValueError("At least one positive process width is required")
+        self._widths = tuple(sorted(set(widths), reverse=True))
+        self._index = 0
+        self._overload_samples = max(1, int(overload_samples))
+        self._recovery_seconds = max(0.0, float(recovery_seconds))
+        self._overload_streak = 0
+        self._stable_since: float | None = None
+
+    @property
+    def current_width(self) -> int:
+        return self._widths[self._index]
+
+    def observe(
+        self,
+        *,
+        processing_ms: float,
+        frame_age_ms: float,
+        discarded: bool = False,
+        now: float | None = None,
+    ) -> bool:
+        now = time.monotonic() if now is None else now
+        severe = (
+            discarded
+            or processing_ms >= FAST_SEVERE_PROCESSING_MS
+            or frame_age_ms >= FAST_SEVERE_FRAME_AGE_MS
+        )
+        overloaded = processing_ms >= FAST_OVERLOAD_PROCESSING_MS or frame_age_ms >= FAST_OVERLOAD_FRAME_AGE_MS
+        stable = processing_ms <= FAST_RECOVERY_PROCESSING_MS and frame_age_ms <= FAST_RECOVERY_FRAME_AGE_MS
+
+        if severe:
+            self._overload_streak = 0
+            self._stable_since = None
+            return self._lower_width()
+
+        if overloaded:
+            self._stable_since = None
+            self._overload_streak += 1
+            if self._overload_streak >= self._overload_samples:
+                self._overload_streak = 0
+                return self._lower_width()
+            return False
+
+        self._overload_streak = 0
+        if self._index == 0 or not stable:
+            self._stable_since = None
+            return False
+        if self._stable_since is None:
+            self._stable_since = now
+            return False
+        if now - self._stable_since < self._recovery_seconds:
+            return False
+
+        self._index -= 1
+        self._stable_since = now
+        return True
+
+    def _lower_width(self) -> bool:
+        if self._index >= len(self._widths) - 1:
+            return False
+        self._index += 1
+        return True
 
 
 @dataclass(frozen=True)
@@ -302,6 +384,14 @@ class HeadSegmenter:
     @property
     def last_mask_age_ms(self) -> float:
         return self._last_mask_age_ms
+
+    def reset_cache(self) -> None:
+        self._last_masks = None
+        self._last_detection_center = None
+        self._last_detection_width = None
+        self._last_segmented_perf = 0.0
+        self._last_segment_frame_index = self._frame_index
+        self._last_mask_age_ms = 0.0
 
     def segment(self, frame_bgr: np.ndarray, detections: FaceDetections) -> SegmentationMasks:
         self._frame_index += 1
@@ -604,11 +694,15 @@ class FastEffectPipeline:
         segmenter: HeadSegmenterProtocol | None = None,
         *,
         process_width: int = FAST_PROCESS_WIDTH,
+        width_controller: AdaptiveProcessWidthController | None = None,
     ) -> None:
         base_tracker = tracker or detector or MediaPipeFaceTracker()
         self.tracker = CachedFaceTracker(base_tracker, detect_every_n_frames=1)
         self.segmenter = segmenter or HeadSegmenter(segment_every_n_frames=8, ema_alpha=0.72)
-        self.process_width = process_width
+        self._width_controller = width_controller or AdaptiveProcessWidthController(
+            FAST_PROCESS_WIDTH_LEVELS if process_width == FAST_PROCESS_WIDTH else (process_width,)
+        )
+        self.process_width = self._width_controller.current_width
         self._last_detection_center: tuple[float, float] | None = None
         self._last_detection_width: float | None = None
         self._last_motion_ratio = 0.0
@@ -626,6 +720,23 @@ class FastEffectPipeline:
     @property
     def last_mask_age_ms(self) -> float:
         return self._last_mask_age_ms
+
+    def record_performance(self, *, processing_ms: float, frame_age_ms: float, discarded: bool) -> bool:
+        changed = self._width_controller.observe(
+            processing_ms=processing_ms,
+            frame_age_ms=frame_age_ms,
+            discarded=discarded,
+        )
+        if not changed:
+            return False
+
+        self.process_width = self._width_controller.current_width
+        self._last_detection_center = None
+        self._last_detection_width = None
+        reset_cache = getattr(self.segmenter, "reset_cache", None)
+        if callable(reset_cache):
+            reset_cache()
+        return True
 
     def apply(
         self,
@@ -780,6 +891,19 @@ class EffectPipeline:
     @property
     def last_mask_age_ms(self) -> float:
         return self._last_mask_age_ms
+
+    @property
+    def fast_process_width(self) -> int:
+        return self._fast.process_width if self._fast is not None else FAST_PROCESS_WIDTH
+
+    def record_fast_performance(self, *, processing_ms: float, frame_age_ms: float, discarded: bool) -> bool:
+        if self._fast is None:
+            return False
+        return self._fast.record_performance(
+            processing_ms=processing_ms,
+            frame_age_ms=frame_age_ms,
+            discarded=discarded,
+        )
 
     def apply(
         self,
@@ -1377,12 +1501,12 @@ def apply_doll_shape(
         return frame_bgr
 
     result = frame_bgr.copy()
-    round_strength = settings.eye_roundness * doll * (0.44 if fast else 0.54)
-    slim_strength = doll * (0.10 + 0.28 * settings.face_slim)
+    round_strength = settings.eye_roundness * doll * (0.50 if fast else 0.62)
+    slim_strength = doll * (0.12 + 0.31 * settings.face_slim)
     for face in detections.faces:
         if round_strength > 0:
             for eye in face.eyes:
-                result = local_eye_round(result, eye, min(0.42, round_strength))
+                result = local_eye_round(result, eye, min(0.48, round_strength))
         if slim_strength > 0:
             cx, _ = face.bbox.center
             left_center = point_center(face.left_cheek)
@@ -1404,7 +1528,7 @@ def apply_doll_shape(
             result = local_translate(
                 result,
                 (cx, face.bbox.y + face.bbox.height * 0.88),
-                (0, -face.bbox.height * 0.050 * slim_strength),
+                (0, -face.bbox.height * 0.064 * slim_strength),
                 radius * 0.78,
             )
     return result
@@ -1521,6 +1645,13 @@ def apply_doll_eye_makeup(
         return frame_bgr
 
     result = frame_bgr.copy()
+    iris_zoom_strength = min(0.30, settings.iris_gloss * doll * (0.18 if fast else 0.24))
+    if iris_zoom_strength > 0:
+        for iris in (face.left_iris, face.right_iris):
+            if len(iris) >= 2:
+                iris_box = box_from_points(iris, frame_bgr.shape, padding=0.55)
+                result = local_zoom(result, iris_box, iris_zoom_strength, scale_x=2.35, scale_y=2.35)
+
     line_thickness = max(1, int(face.bbox.width * (0.010 if fast else 0.014)))
     liner_strength = min(0.70, settings.eye_liner * doll * (0.58 if fast else 0.76))
     if liner_strength > 0:

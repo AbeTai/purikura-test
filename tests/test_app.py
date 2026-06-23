@@ -96,6 +96,7 @@ def test_app_core_api_flow(monkeypatch) -> None:
         assert isinstance(performance.json()["publish_lag_frames"], int)
         assert isinstance(performance.json()["preview_stall_ms"], float)
         assert isinstance(performance.json()["latest_raw_frame_id"], int)
+        assert isinstance(performance.json()["process_width"], int)
 
         invalid_effects = client.put(
             "/api/effects",

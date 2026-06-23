@@ -28,6 +28,7 @@ function formatMs(value) {
 function renderPerformance(performance) {
   const metrics = [
     ["Profile", performance.profile],
+    ["Process width", performance.process_width ? `${performance.process_width}px` : "-"],
     ["Process", formatMs(performance.processing_ms)],
     ["Encode", formatMs(performance.encode_ms)],
     ["FPS", Number(performance.effective_fps || 0).toFixed(1)],

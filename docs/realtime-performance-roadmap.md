@@ -221,16 +221,19 @@ previewは追従性最優先、captureは画質最優先にします。
 - previewを軽くしても保存画質を落とさずに済む。
 - 動いている間のpreviewは薄くしても、撮影結果はしっかり盛れる。
 
-### 4. 動的process_width
+### 4. 動的process_width（実装済み）
 
 Fastは横幅640px固定ですが、処理が詰まる場面では自動で下げます。
 
-案:
+実装:
 
 - 通常: 640px。
-- `processing_ms > 80` または `frame_age_ms > 120`: 512px。
-- `processing_ms > 120` または `discarded_processed_frames` が連続: 448px。
-- 1秒以上安定したら段階的に640pxへ戻す。
+- `processing_ms >= 80` または `frame_age_ms >= 120` が2回続くと一段下げる。
+- `processing_ms >= 120`、`frame_age_ms >= 180`、または加工結果が古く破棄された場合は即座に一段下げる。
+- `processing_ms <= 68` かつ `frame_age_ms <= 100` が1秒以上続いたら一段ずつ640pxへ戻す。
+- 変更可能な処理幅は `640 / 512 / 448px`。
+- 処理幅変更時はsegmenterのcacheを破棄し、異なる解像度のmaskを混ぜない。
+- 現在の処理幅は `/api/performance` とUIのPerformanceパネルで確認できる。
 
 注意:
 
@@ -804,6 +807,12 @@ OpenCV/NumPyとの往復転送が増えると逆に遅くなります。
 
 - Fast平均70ms以下。
 - `frame_age_ms` 100ms以下。
+
+現状:
+
+- 動的process_widthは実装済み。
+- 1280x720の簡易ベンチでFast平均62.2ms、16.1fpsを確認した。
+- background/glowの低頻度cache、blend集約、stage別traceは未実装。
 
 ### Step 7: native/GPU検証
 
