@@ -29,6 +29,7 @@ from purikura_test.effects import (
     empty_masks,
     face_geometry_from_box,
     face_geometry_from_normalized_landmarks,
+    attenuate_settings_for_motion,
     detection_motion_ratio,
     detection_motion_delta,
     head_roi,
@@ -36,6 +37,7 @@ from purikura_test.effects import (
     local_translate,
     local_zoom,
     masks_from_segmenter_result,
+    motion_preview_scale,
     primary_face_motion_reference,
     translate_masks,
 )
@@ -70,6 +72,17 @@ class CountingTracker:
     def detect(self, frame_bgr: np.ndarray) -> FaceDetections:
         self.calls += 1
         return self.detections
+
+
+class SequenceTracker:
+    def __init__(self, detections: list[FaceDetections]) -> None:
+        self.detections = detections
+        self.calls = 0
+
+    def detect(self, frame_bgr: np.ndarray) -> FaceDetections:
+        index = min(self.calls, len(self.detections) - 1)
+        self.calls += 1
+        return self.detections[index]
 
 
 class FakeMask:
@@ -302,6 +315,28 @@ def test_detection_motion_ratio_tracks_face_center_movement() -> None:
     assert missing_ratio == float("inf")
 
 
+def test_motion_preview_scale_and_settings_attenuation() -> None:
+    settings = EffectSettings(
+        processing_profile="fast",
+        skin_smoothing=0.8,
+        purikura_intensity=0.9,
+        eye_enlarge=0.4,
+        face_slim=0.4,
+        doll_intensity=0.9,
+        background_high_key=0.8,
+    )
+
+    still_scale = motion_preview_scale(0.01)
+    moving_scale = motion_preview_scale(0.18)
+    attenuated = attenuate_settings_for_motion(settings, moving_scale)
+
+    assert still_scale == 1.0
+    assert moving_scale < 0.5
+    assert attenuated.doll_intensity < settings.doll_intensity
+    assert attenuated.background_high_key < settings.background_high_key
+    assert attenuated.eye_enlarge < settings.eye_enlarge
+
+
 def test_translate_masks_moves_foreground_and_recomputes_background() -> None:
     image_shape = (80, 90, 3)
     base = np.zeros(image_shape[:2], dtype=np.float32)
@@ -323,6 +358,22 @@ def test_translate_masks_moves_foreground_and_recomputes_background() -> None:
     assert shifted.skin[36, 45] > masks.skin[36, 45]
     assert shifted.skin[36, 33] < masks.skin[36, 33]
     assert shifted.background[36, 33] > shifted.background[36, 45]
+
+
+def test_fast_pipeline_records_motion_ratio_for_preview() -> None:
+    frame = np.full((160, 120, 3), 82, dtype=np.uint8)
+    first = synthetic_face_at(DetectionBox(18, 14, 84, 128), frame.shape)
+    second = synthetic_face_at(DetectionBox(42, 14, 84, 128), frame.shape)
+    pipeline = EffectPipeline(
+        tracker=SequenceTracker([first, second]),
+        segmenter=DynamicSegmenter(),
+    )
+    settings = EffectSettings(processing_profile="fast")
+
+    pipeline.apply(frame, settings)
+    pipeline.apply(frame, settings)
+
+    assert pipeline.last_motion_ratio > 0.20
 
 
 def test_head_roi_uses_face_and_mask_bounds() -> None:

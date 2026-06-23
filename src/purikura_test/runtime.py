@@ -172,9 +172,11 @@ class PurikuraRuntime:
                 continue
 
             started = time.perf_counter()
-            processed = self._ensure_pipeline().apply(packet.frame, settings, frame_asset)
+            pipeline = self._ensure_pipeline()
+            processed = pipeline.apply(packet.frame, settings, frame_asset)
             processed_at = time.perf_counter()
             processing_ms = (processed_at - started) * 1000
+            motion_factor = pipeline.last_motion_ratio
             with self._lock:
                 if not self._is_packet_fresh_for_publish(packet, settings):
                     self._performance.discarded_processed_frames += 1
@@ -182,6 +184,7 @@ class PurikuraRuntime:
                     self._performance.encode_ms = 0.0
                     self._performance.effective_fps = 1000 / processing_ms if processing_ms > 0 else 0.0
                     self._performance.frame_age_ms = (time.perf_counter() - packet.captured_at) * 1000
+                    self._performance.motion_factor = motion_factor
                     self._performance.profile = settings.processing_profile
                     continue
             ok, encoded = cv2.imencode(".jpg", processed, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
@@ -194,6 +197,7 @@ class PurikuraRuntime:
                 self._performance.encode_ms = encode_ms
                 self._performance.effective_fps = 1000 / processing_ms if processing_ms > 0 else 0.0
                 self._performance.frame_age_ms = (time.perf_counter() - packet.captured_at) * 1000
+                self._performance.motion_factor = motion_factor
                 self._performance.published_frame_id = packet.id
                 self._performance.profile = settings.processing_profile
 

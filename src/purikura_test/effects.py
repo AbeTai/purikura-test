@@ -536,9 +536,16 @@ class FastEffectPipeline:
         process_width: int = FAST_PROCESS_WIDTH,
     ) -> None:
         base_tracker = tracker or detector or MediaPipeFaceTracker()
-        self.tracker = CachedFaceTracker(base_tracker, detect_every_n_frames=2)
+        self.tracker = CachedFaceTracker(base_tracker, detect_every_n_frames=1)
         self.segmenter = segmenter or HeadSegmenter(segment_every_n_frames=8, ema_alpha=0.72)
         self.process_width = process_width
+        self._last_detection_center: tuple[float, float] | None = None
+        self._last_detection_width: float | None = None
+        self._last_motion_ratio = 0.0
+
+    @property
+    def last_motion_ratio(self) -> float:
+        return self._last_motion_ratio
 
     def apply(
         self,
@@ -549,21 +556,34 @@ class FastEffectPipeline:
         source_height, source_width = frame_bgr.shape[:2]
         working = resize_for_processing(frame_bgr, self.process_width)
         detections = self.tracker.detect(working)
+        motion_ratio = detection_motion_ratio(detections, self._last_detection_center, self._last_detection_width)
+        if not np.isfinite(motion_ratio):
+            motion_ratio = 1.0
+        self._last_motion_ratio = float(motion_ratio)
+        self._last_detection_center, self._last_detection_width = primary_face_motion_reference(detections)
+        motion_scale = motion_preview_scale(motion_ratio)
+        preview_settings = attenuate_settings_for_motion(settings, motion_scale)
         masks = self.segmenter.segment(working, detections)
 
         adjusted = working.copy()
-        profile_strength = settings.purikura_intensity * (1.0 + settings.doll_intensity * 0.14)
-        adjusted = QualityEffectPipeline._apply_face_slim(adjusted, detections, settings.face_slim * profile_strength * 0.82)
-        adjusted = apply_doll_shape(adjusted, detections, settings, fast=True)
-        adjusted = QualityEffectPipeline._enlarge_eyes(adjusted, detections, settings.eye_enlarge * profile_strength * 0.9)
-        adjusted = self._apply_fast_beauty(adjusted, settings, detections, masks)
-        adjusted = apply_hair_silk(adjusted, settings, masks, fast=True)
-        adjusted = apply_background_high_key(adjusted, settings, masks, fast=True)
-        adjusted = apply_doll_makeup(adjusted, detections, settings, fast=True)
-        adjusted = self._apply_fast_tone(adjusted, settings)
-        adjusted = apply_soft_glow(adjusted, settings, fast=True)
+        profile_strength = preview_settings.purikura_intensity * (1.0 + preview_settings.doll_intensity * 0.14)
+        adjusted = QualityEffectPipeline._apply_face_slim(adjusted, detections, preview_settings.face_slim * profile_strength * 0.82)
+        adjusted = apply_doll_shape(adjusted, detections, preview_settings, fast=True)
+        adjusted = QualityEffectPipeline._enlarge_eyes(adjusted, detections, preview_settings.eye_enlarge * profile_strength * 0.9)
+        adjusted = self._apply_fast_beauty(adjusted, preview_settings, detections, masks, motion_scale=motion_scale)
+        adjusted = apply_hair_silk(adjusted, preview_settings, masks, fast=True)
+        adjusted = apply_background_high_key(adjusted, preview_settings, masks, fast=True)
+        adjusted = apply_doll_makeup(adjusted, detections, preview_settings, fast=True)
+        adjusted = self._apply_fast_tone(adjusted, preview_settings)
+        adjusted = apply_soft_glow(adjusted, preview_settings, fast=True)
         if settings.debug_overlay != "off":
-            adjusted = draw_debug_overlay(adjusted, detections, masks, settings.debug_overlay)
+            adjusted = draw_debug_overlay(
+                adjusted,
+                detections,
+                masks,
+                settings.debug_overlay,
+                extra_label=f" motion={motion_ratio:.2f} scale={motion_scale:.2f}",
+            )
 
         if adjusted.shape[:2] != (source_height, source_width):
             adjusted = cv2.resize(adjusted, (source_width, source_height), interpolation=cv2.INTER_LINEAR)
@@ -575,6 +595,8 @@ class FastEffectPipeline:
         settings: EffectSettings,
         detections: FaceDetections,
         masks: SegmentationMasks,
+        *,
+        motion_scale: float = 1.0,
     ) -> np.ndarray:
         roi = head_roi(frame_bgr.shape, detections, masks)
         if roi is None:
@@ -604,29 +626,33 @@ class FastEffectPipeline:
         whitening = np.clip(settings.skin_whitening + settings.porcelain_skin * doll * 0.22, 0.0, 1.0)
         skin_target = cv2.addWeighted(smooth, 1.0 - 0.26 * whitening, ivory, 0.26 * whitening, 12 * whitening)
         skin_target = cv2.addWeighted(skin_target, 1.0 - 0.08 * intensity, pink, 0.08 * intensity, 0)
-        skin_strength = np.clip(skin * (0.62 * settings.skin_smoothing + 0.34 * whitening + 0.24 * intensity + 0.18 * settings.porcelain_skin * doll), 0.0, 0.92)
+        skin_strength = np.clip(
+            skin * (0.62 * settings.skin_smoothing + 0.34 * whitening + 0.24 * intensity + 0.18 * settings.porcelain_skin * doll) * motion_scale,
+            0.0,
+            0.92,
+        )
         blended = blend_by_mask(base, skin_target, skin_strength)
 
         part_masks = build_part_masks(frame_bgr.shape, detections)
         cheek = np.clip(part_masks.cheeks[y1:y2, x1:x2] * skin, 0.0, 1.0)
         if float(np.max(cheek)) > 0.01:
             blush_target = cv2.addWeighted(blended, 0.76, np.full_like(blended, (166, 140, 255)), 0.24, 0)
-            blended = blend_by_mask(blended, blush_target, cheek * settings.blush * 0.30)
+            blended = blend_by_mask(blended, blush_target, cheek * settings.blush * 0.30 * motion_scale)
 
         bridge = np.clip(part_masks.nose_bridge[y1:y2, x1:x2] * skin, 0.0, 1.0)
         if float(np.max(bridge)) > 0.01:
             highlight = cv2.addWeighted(blended, 0.84, np.full_like(blended, (235, 238, 255)), 0.16, 4 * intensity)
-            blended = blend_by_mask(blended, highlight, bridge * (0.18 + 0.22 * intensity))
+            blended = blend_by_mask(blended, highlight, bridge * (0.18 + 0.22 * intensity) * motion_scale)
 
         if float(np.max(hair)) > 0.01:
             hair_target = cv2.addWeighted(blended, 0.92, pink, 0.08, 2 * intensity)
-            blended = blend_by_mask(blended, hair_target, hair * (0.06 + 0.12 * intensity))
+            blended = blend_by_mask(blended, hair_target, hair * (0.06 + 0.12 * intensity) * motion_scale)
 
         for face in detections.faces:
             blended_full = result.copy()
             blended_full[y1:y2, x1:x2] = blended
-            blended_full = apply_lip_tint(blended_full, face, settings.lip_tint * intensity * 0.9)
-            blended_full = apply_eye_sparkle(blended_full, face, settings.eye_sparkle * intensity)
+            blended_full = apply_lip_tint(blended_full, face, settings.lip_tint * intensity * 0.9 * motion_scale)
+            blended_full = apply_eye_sparkle(blended_full, face, settings.eye_sparkle * intensity * motion_scale)
             blended = blended_full[y1:y2, x1:x2]
 
         result[y1:y2, x1:x2] = blended
@@ -657,6 +683,11 @@ class EffectPipeline:
         self._fast_segmenter: HeadSegmenterProtocol | None = segmenter
         self._quality: QualityEffectPipeline | None = None
         self._fast: FastEffectPipeline | None = None
+        self._last_motion_ratio = 0.0
+
+    @property
+    def last_motion_ratio(self) -> float:
+        return self._last_motion_ratio
 
     def apply(
         self,
@@ -665,7 +696,11 @@ class EffectPipeline:
         frame_asset: FrameAsset | None = None,
     ) -> np.ndarray:
         if settings.processing_profile == "fast":
-            return self._ensure_fast().apply(frame_bgr, settings, frame_asset)
+            pipeline = self._ensure_fast()
+            result = pipeline.apply(frame_bgr, settings, frame_asset)
+            self._last_motion_ratio = pipeline.last_motion_ratio
+            return result
+        self._last_motion_ratio = 0.0
         return self._ensure_quality().apply(frame_bgr, settings, frame_asset)
 
     def _ensure_quality(self) -> QualityEffectPipeline:
@@ -849,6 +884,35 @@ def detection_motion_delta(
     if current_center is None or previous_center is None:
         return 0.0, 0.0
     return current_center[0] - previous_center[0], current_center[1] - previous_center[1]
+
+
+def motion_preview_scale(motion_ratio: float) -> float:
+    if not np.isfinite(motion_ratio):
+        return 0.35
+    if motion_ratio <= 0.04:
+        return 1.0
+    if motion_ratio >= 0.18:
+        return 0.35
+    progress = (motion_ratio - 0.04) / 0.14
+    return float(np.clip(1.0 - progress * 0.65, 0.35, 1.0))
+
+
+def attenuate_settings_for_motion(settings: EffectSettings, motion_scale: float) -> EffectSettings:
+    motion_scale = float(np.clip(motion_scale, 0.35, 1.0))
+    if motion_scale >= 0.995:
+        return settings
+    shape_scale = 0.70 + 0.30 * motion_scale
+    tone_scale = 0.78 + 0.22 * motion_scale
+    return settings.model_copy(
+        update={
+            "skin_smoothing": settings.skin_smoothing * tone_scale,
+            "purikura_intensity": settings.purikura_intensity * tone_scale,
+            "eye_enlarge": settings.eye_enlarge * shape_scale,
+            "face_slim": settings.face_slim * shape_scale,
+            "doll_intensity": settings.doll_intensity * motion_scale,
+            "background_high_key": settings.background_high_key * motion_scale,
+        }
+    )
 
 
 def points_for_indices(points: np.ndarray, indices: tuple[int, ...]) -> np.ndarray:
@@ -1664,6 +1728,8 @@ def draw_debug_overlay(
     detections: FaceDetections,
     masks: SegmentationMasks,
     mode: str,
+    *,
+    extra_label: str = "",
 ) -> np.ndarray:
     if mode == "off":
         return frame_bgr
@@ -1674,7 +1740,7 @@ def draw_debug_overlay(
         result = draw_part_debug(result, detections)
     if mode in {"landmarks", "all"}:
         result = draw_landmark_debug(result, detections)
-    draw_debug_label(result, f"faces={len(detections.faces)} overlay={mode}")
+    draw_debug_label(result, f"faces={len(detections.faces)} overlay={mode}{extra_label}")
     return result
 
 
