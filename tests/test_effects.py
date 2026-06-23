@@ -30,12 +30,14 @@ from purikura_test.effects import (
     face_geometry_from_box,
     face_geometry_from_normalized_landmarks,
     detection_motion_ratio,
+    detection_motion_delta,
     head_roi,
     local_eye_round,
     local_translate,
     local_zoom,
     masks_from_segmenter_result,
     primary_face_motion_reference,
+    translate_masks,
 )
 
 
@@ -291,10 +293,36 @@ def test_detection_motion_ratio_tracks_face_center_movement() -> None:
     previous_center, previous_width = primary_face_motion_reference(previous)
 
     ratio = detection_motion_ratio(moved, previous_center, previous_width)
+    delta = detection_motion_delta(moved, previous_center)
     missing_ratio = detection_motion_ratio(FaceDetections(faces=()), previous_center, previous_width)
 
     assert ratio > 0.20
+    assert delta[0] > 20
+    assert abs(delta[1]) < 1
     assert missing_ratio == float("inf")
+
+
+def test_translate_masks_moves_foreground_and_recomputes_background() -> None:
+    image_shape = (80, 90, 3)
+    base = np.zeros(image_shape[:2], dtype=np.float32)
+    base[30:42, 28:40] = 1.0
+    masks = SegmentationMasks(
+        head=base.copy(),
+        skin=base.copy(),
+        hair=np.zeros_like(base),
+        protected=np.zeros_like(base),
+        face_skin=base.copy(),
+        body_skin=np.zeros_like(base),
+        background=1.0 - base,
+        clothes=np.zeros_like(base),
+    )
+    shifted = translate_masks(masks, image_shape, (12.0, 0.0))
+
+    assert shifted.skin.shape == masks.skin.shape
+    assert shifted.skin.dtype == np.float32
+    assert shifted.skin[36, 45] > masks.skin[36, 45]
+    assert shifted.skin[36, 33] < masks.skin[36, 33]
+    assert shifted.background[36, 33] > shifted.background[36, 45]
 
 
 def test_head_roi_uses_face_and_mask_bounds() -> None:

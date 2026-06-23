@@ -278,13 +278,18 @@ class HeadSegmenter:
         self._frame_index += 1
         motion_ratio = detection_motion_ratio(detections, self._last_detection_center, self._last_detection_width)
         high_motion = motion_ratio > MASK_MOTION_RESET_RATIO
+        motion_shift = detection_motion_delta(detections, self._last_detection_center)
         should_reuse = (
             self._last_masks is not None
             and not high_motion
             and (self._frame_index - 1) % self._segment_every_n_frames != 0
         )
         if should_reuse:
-            return self._with_current_protection(self._last_masks, frame_bgr.shape, detections)
+            shifted_masks = translate_masks(self._last_masks, frame_bgr.shape, motion_shift)
+            shifted_masks = self._with_current_protection(shifted_masks, frame_bgr.shape, detections)
+            self._last_masks = shifted_masks
+            self._last_detection_center, self._last_detection_width = primary_face_motion_reference(detections)
+            return shifted_masks
 
         timestamp_ms = max(int(time.monotonic() * 1000), self._last_timestamp_ms + 1)
         self._last_timestamp_ms = timestamp_ms
@@ -294,7 +299,8 @@ class HeadSegmenter:
         result = self._segmenter.segment_for_video(mp_image, timestamp_ms)
         new_masks = masks_from_segmenter_result(result, frame_bgr.shape, detections)
         if self._last_masks is not None and not high_motion:
-            new_masks = ema_masks(self._last_masks, new_masks, self._ema_alpha)
+            previous_masks = translate_masks(self._last_masks, frame_bgr.shape, motion_shift)
+            new_masks = ema_masks(previous_masks, new_masks, self._ema_alpha)
             new_masks = self._with_current_protection(new_masks, frame_bgr.shape, detections)
         self._last_masks = new_masks
         self._last_detection_center, self._last_detection_width = primary_face_motion_reference(detections)
@@ -835,6 +841,16 @@ def detection_motion_ratio(
     return float(np.sqrt(dx * dx + dy * dy) / width)
 
 
+def detection_motion_delta(
+    detections: FaceDetections,
+    previous_center: tuple[float, float] | None,
+) -> tuple[float, float]:
+    current_center, _ = primary_face_motion_reference(detections)
+    if current_center is None or previous_center is None:
+        return 0.0, 0.0
+    return current_center[0] - previous_center[0], current_center[1] - previous_center[1]
+
+
 def points_for_indices(points: np.ndarray, indices: tuple[int, ...]) -> np.ndarray:
     valid = [index for index in indices if index < len(points)]
     return points[valid]
@@ -945,6 +961,50 @@ def ema_masks(previous: SegmentationMasks, current: SegmentationMasks, alpha: fl
         body_skin=mix(previous.body_skin, current.body_skin),
         background=mix(previous.background, current.background),
         clothes=mix(previous.clothes, current.clothes),
+    )
+
+
+def translate_masks(
+    masks: SegmentationMasks,
+    image_shape: tuple[int, ...],
+    shift: tuple[float, float],
+) -> SegmentationMasks:
+    dx, dy = shift
+    if abs(dx) < 0.5 and abs(dy) < 0.5:
+        return masks
+
+    height, width = image_shape[:2]
+
+    def move(mask: np.ndarray) -> np.ndarray:
+        transform = np.array([[1.0, 0.0, dx], [0.0, 1.0, dy]], dtype=np.float32)
+        shifted = cv2.warpAffine(
+            mask.astype(np.float32),
+            transform,
+            (width, height),
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=0,
+        )
+        return np.clip(shifted, 0.0, 1.0).astype(np.float32)
+
+    head = move(masks.head)
+    skin = move(masks.skin)
+    hair = move(masks.hair)
+    face_skin = move(masks.face_skin)
+    body_skin = move(masks.body_skin)
+    clothes = move(masks.clothes)
+    protected = move(masks.protected)
+    foreground = np.clip(np.maximum(head, clothes), 0.0, 1.0)
+    background = np.clip(1.0 - smooth_mask(foreground, sigma=1.0), 0.0, 1.0).astype(np.float32)
+    return SegmentationMasks(
+        head=head,
+        skin=skin,
+        hair=hair,
+        protected=protected,
+        face_skin=face_skin,
+        body_skin=body_skin,
+        background=background,
+        clothes=clothes,
     )
 
 
