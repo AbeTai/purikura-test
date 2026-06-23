@@ -1,3 +1,4 @@
+import time
 from types import SimpleNamespace
 
 import numpy as np
@@ -9,8 +10,11 @@ from purikura_test.effects import (
     DetectionBox,
     EffectPipeline,
     FACE_OVAL,
+    HeadSegmenter,
     LEFT_EYE,
     LIPS,
+    SEGMENT_MEDIUM_MOTION_RATIO,
+    SEGMENT_MODERATE_EVERY_N_FRAMES,
     FaceDetections,
     FrameAsset,
     RIGHT_EYE,
@@ -39,6 +43,7 @@ from purikura_test.effects import (
     masks_from_segmenter_result,
     motion_preview_scale,
     primary_face_motion_reference,
+    segment_interval_for_motion,
     translate_masks,
 )
 
@@ -99,6 +104,58 @@ class FakeSegmenterResult:
     def __init__(self, masks: list[np.ndarray]) -> None:
         self.confidence_masks = [FakeMask(mask) for mask in masks]
         self.category_mask = None
+
+
+class FakeMP:
+    class ImageFormat:
+        SRGB = "srgb"
+
+    class Image:
+        def __init__(self, image_format: object, data: np.ndarray) -> None:
+            self.image_format = image_format
+            self.data = data
+
+
+class FakeVideoSegmenter:
+    def __init__(self, image_shape: tuple[int, int, int]) -> None:
+        self.calls = 0
+        self.image_shape = image_shape
+
+    def segment_for_video(self, image: object, timestamp_ms: int) -> FakeSegmenterResult:
+        self.calls += 1
+        height, width = self.image_shape[:2]
+        masks = [np.zeros((height, width), dtype=np.float32) for _ in range(6)]
+        offset = min(width // 4, self.calls * 3)
+        masks[3][height // 4 : height * 3 // 4, offset : min(width, offset + width // 3)] = 0.9
+        masks[2][height // 2 : height * 7 // 8, offset : min(width, offset + width // 2)] = 0.8
+        masks[1][height // 8 : height // 3, offset : min(width, offset + width // 3)] = 0.7
+        masks[0][:] = 1.0 - np.maximum.reduce(masks[1:5])
+        return FakeSegmenterResult(masks)
+
+
+def fake_head_segmenter(
+    image_shape: tuple[int, int, int],
+    *,
+    segment_every_n_frames: int = 8,
+    max_reuse_age_ms: float = 10_000.0,
+) -> HeadSegmenter:
+    segmenter = object.__new__(HeadSegmenter)
+    segmenter._mp = FakeMP
+    segmenter._segmenter = FakeVideoSegmenter(image_shape)
+    segmenter._segment_every_n_frames = segment_every_n_frames
+    segmenter._ema_alpha = 0.0
+    segmenter._max_reuse_age_ms = max_reuse_age_ms
+    segmenter._medium_motion_ratio = SEGMENT_MEDIUM_MOTION_RATIO
+    segmenter._moderate_motion_interval = SEGMENT_MODERATE_EVERY_N_FRAMES
+    segmenter._frame_index = 0
+    segmenter._last_timestamp_ms = 0
+    segmenter._last_masks = None
+    segmenter._last_detection_center = None
+    segmenter._last_detection_width = None
+    segmenter._last_segmented_perf = 0.0
+    segmenter._last_segment_frame_index = 0
+    segmenter._last_mask_age_ms = 0.0
+    return segmenter
 
 
 def synthetic_face(image_shape: tuple[int, int, int] = (160, 120, 3)) -> FaceDetections:
@@ -351,6 +408,40 @@ def test_motion_preview_scale_and_settings_attenuation() -> None:
     assert attenuated.doll_intensity < settings.doll_intensity
     assert attenuated.background_high_key < settings.background_high_key
     assert attenuated.eye_enlarge < settings.eye_enlarge
+
+
+def test_segment_interval_for_motion_adapts_to_face_movement() -> None:
+    assert segment_interval_for_motion(0.01, 8) == 8
+    assert segment_interval_for_motion(0.05, 8) == 2
+    assert segment_interval_for_motion(0.11, 8) == 1
+    assert segment_interval_for_motion(float("inf"), 8) == 1
+
+
+def test_head_segmenter_refreshes_early_for_moderate_motion() -> None:
+    frame = np.zeros((80, 100, 3), dtype=np.uint8)
+    segmenter = fake_head_segmenter(frame.shape, segment_every_n_frames=8)
+    first = synthetic_face_at(DetectionBox(10, 10, 40, 60), frame.shape)
+    moved = synthetic_face_at(DetectionBox(13, 10, 40, 60), frame.shape)
+
+    segmenter.segment(frame, first)
+    assert segmenter._segmenter.calls == 1
+    segmenter.segment(frame, first)
+    assert segmenter._segmenter.calls == 1
+    segmenter.segment(frame, moved)
+
+    assert segmenter._segmenter.calls == 2
+
+
+def test_head_segmenter_refreshes_when_cached_mask_is_too_old() -> None:
+    frame = np.zeros((80, 100, 3), dtype=np.uint8)
+    segmenter = fake_head_segmenter(frame.shape, segment_every_n_frames=8, max_reuse_age_ms=10.0)
+    detections = synthetic_face_at(DetectionBox(10, 10, 40, 60), frame.shape)
+
+    segmenter.segment(frame, detections)
+    segmenter._last_segmented_perf = time.perf_counter() - 1.0
+    segmenter.segment(frame, detections)
+
+    assert segmenter._segmenter.calls == 2
 
 
 def test_translate_masks_moves_foreground_and_recomputes_background() -> None:

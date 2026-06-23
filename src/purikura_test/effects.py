@@ -79,7 +79,10 @@ SEG_OTHERS = 5
 SEGMENT_EVERY_N_FRAMES = 4
 MASK_EMA_ALPHA = 0.65
 FAST_PROCESS_WIDTH = 640
+SEGMENT_MEDIUM_MOTION_RATIO = 0.04
 MASK_MOTION_RESET_RATIO = 0.10
+SEGMENT_MAX_REUSE_AGE_MS = 150.0
+SEGMENT_MODERATE_EVERY_N_FRAMES = 2
 
 
 @dataclass(frozen=True)
@@ -255,6 +258,9 @@ class HeadSegmenter:
         *,
         segment_every_n_frames: int = SEGMENT_EVERY_N_FRAMES,
         ema_alpha: float = MASK_EMA_ALPHA,
+        max_reuse_age_ms: float = SEGMENT_MAX_REUSE_AGE_MS,
+        medium_motion_ratio: float = SEGMENT_MEDIUM_MOTION_RATIO,
+        moderate_motion_interval: int = SEGMENT_MODERATE_EVERY_N_FRAMES,
     ) -> None:
         resolved_model_path = Path(
             model_path
@@ -281,12 +287,16 @@ class HeadSegmenter:
         self._segmenter = vision.ImageSegmenter.create_from_options(options)
         self._segment_every_n_frames = max(1, segment_every_n_frames)
         self._ema_alpha = float(np.clip(ema_alpha, 0.0, 1.0))
+        self._max_reuse_age_ms = max(0.0, float(max_reuse_age_ms))
+        self._medium_motion_ratio = max(0.0, float(medium_motion_ratio))
+        self._moderate_motion_interval = max(1, int(moderate_motion_interval))
         self._frame_index = 0
         self._last_timestamp_ms = 0
         self._last_masks: SegmentationMasks | None = None
         self._last_detection_center: tuple[float, float] | None = None
         self._last_detection_width: float | None = None
         self._last_segmented_perf = 0.0
+        self._last_segment_frame_index = 0
         self._last_mask_age_ms = 0.0
 
     @property
@@ -296,21 +306,29 @@ class HeadSegmenter:
     def segment(self, frame_bgr: np.ndarray, detections: FaceDetections) -> SegmentationMasks:
         self._frame_index += 1
         motion_ratio = detection_motion_ratio(detections, self._last_detection_center, self._last_detection_width)
-        high_motion = motion_ratio > MASK_MOTION_RESET_RATIO
+        high_motion = not np.isfinite(motion_ratio) or motion_ratio > MASK_MOTION_RESET_RATIO
         motion_shift = detection_motion_delta(detections, self._last_detection_center)
+        target_interval = segment_interval_for_motion(
+            motion_ratio,
+            self._segment_every_n_frames,
+            medium_motion_ratio=self._medium_motion_ratio,
+            reset_motion_ratio=MASK_MOTION_RESET_RATIO,
+            moderate_interval=self._moderate_motion_interval,
+        )
+        mask_age_ms = (time.perf_counter() - self._last_segmented_perf) * 1000 if self._last_segmented_perf else 0.0
+        frames_since_segment = self._frame_index - self._last_segment_frame_index
         should_reuse = (
             self._last_masks is not None
-            and not high_motion
-            and (self._frame_index - 1) % self._segment_every_n_frames != 0
+            and target_interval > 1
+            and frames_since_segment < target_interval
+            and mask_age_ms < self._max_reuse_age_ms
         )
         if should_reuse:
             shifted_masks = translate_masks(self._last_masks, frame_bgr.shape, motion_shift)
             shifted_masks = self._with_current_protection(shifted_masks, frame_bgr.shape, detections)
             self._last_masks = shifted_masks
             self._last_detection_center, self._last_detection_width = primary_face_motion_reference(detections)
-            self._last_mask_age_ms = (
-                (time.perf_counter() - self._last_segmented_perf) * 1000 if self._last_segmented_perf else 0.0
-            )
+            self._last_mask_age_ms = mask_age_ms
             return shifted_masks
 
         timestamp_ms = max(int(time.monotonic() * 1000), self._last_timestamp_ms + 1)
@@ -326,6 +344,7 @@ class HeadSegmenter:
             new_masks = self._with_current_protection(new_masks, frame_bgr.shape, detections)
         self._last_masks = new_masks
         self._last_segmented_perf = time.perf_counter()
+        self._last_segment_frame_index = self._frame_index
         self._last_mask_age_ms = 0.0
         self._last_detection_center, self._last_detection_width = primary_face_motion_reference(detections)
         return new_masks
@@ -963,6 +982,22 @@ def detection_motion_delta(
     if current_center is None or previous_center is None:
         return 0.0, 0.0
     return current_center[0] - previous_center[0], current_center[1] - previous_center[1]
+
+
+def segment_interval_for_motion(
+    motion_ratio: float,
+    base_interval: int,
+    *,
+    medium_motion_ratio: float = SEGMENT_MEDIUM_MOTION_RATIO,
+    reset_motion_ratio: float = MASK_MOTION_RESET_RATIO,
+    moderate_interval: int = SEGMENT_MODERATE_EVERY_N_FRAMES,
+) -> int:
+    base_interval = max(1, int(base_interval))
+    if not np.isfinite(motion_ratio) or motion_ratio > reset_motion_ratio:
+        return 1
+    if motion_ratio >= medium_motion_ratio:
+        return min(base_interval, max(1, int(moderate_interval)))
+    return base_interval
 
 
 def motion_preview_scale(motion_ratio: float) -> float:

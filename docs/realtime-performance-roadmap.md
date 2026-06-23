@@ -63,6 +63,7 @@
 - Face Landmarkerの検出0件時キャッシュTTLは100ms。
 - Fast previewでは顔ランドマークを毎フレーム更新している。
 - Fast previewではmotionに応じてエフェクト強度を減衰する。
+- SelfieMulticlass Segmenterは固定間引きだけでなく、顔移動量と `mask_age_ms` を見て前倒し更新する。静止時はFastで最大8フレーム再利用し、motion中またはmask age 150ms超過時は古いmaskを使い続けない。
 - 撮影保存では最新rawフレームを固定し、`processing_profile="quality"` にした設定で再処理してDBへ保存する。
 - 起動直後のpreviewは `processing_profile="fast"` を初期値にして、最初の表示が重いQuality処理で詰まらないようにしている。
 - `/api/cameras` は現在使用中のカメラを再Openせず、macOS/OpenCVで起動中キャプチャを不安定にしないようにしている。
@@ -72,7 +73,7 @@
 残る課題:
 
 - すでに加工中の重いフレームは最後まで計算されるため、CPU時間は消費する。
-- Segmenter maskは平行移動のみで、回転、スケール、顔向き変化には弱い。
+- Segmenter maskの再利用は平行移動のみで、再セグメントまでの短い間は回転、スケール、顔向き変化には弱い。
 - ブラウザ側ではframe idを見て古いフレームを捨てられない。
 - DB metadataには現在、撮影時Quality設定は残るが、preview時のprofileは別フィールドとしては残していない。
 
