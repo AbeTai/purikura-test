@@ -20,6 +20,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--warmup", type=int, default=2)
     parser.add_argument("--width", type=int, default=1280)
     parser.add_argument("--height", type=int, default=720)
+    parser.add_argument(
+        "--fast-process-width",
+        type=int,
+        choices=[448, 512, 640],
+        default=640,
+        help="Internal width used by the Fast profile.",
+    )
     return parser.parse_args()
 
 
@@ -71,7 +78,7 @@ def main() -> None:
     args = parse_args()
     frame = load_frame(args.image, args.width, args.height)
     profiles = ["quality", "fast"] if args.profile == "both" else [args.profile]
-    pipeline = EffectPipeline()
+    pipeline = EffectPipeline(fast_process_width=args.fast_process_width)
     for profile in profiles:
         benchmark_profile(pipeline, frame, profile, args.iterations, args.warmup)
 

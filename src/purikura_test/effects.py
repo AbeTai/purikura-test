@@ -80,16 +80,18 @@ SEGMENT_EVERY_N_FRAMES = 4
 MASK_EMA_ALPHA = 0.65
 FAST_PROCESS_WIDTH = 640
 FAST_PROCESS_WIDTH_LEVELS = (640, 512, 448)
+FAST_SEGMENT_EVERY_N_FRAMES = 16
 FAST_OVERLOAD_PROCESSING_MS = 80.0
 FAST_OVERLOAD_FRAME_AGE_MS = 120.0
 FAST_SEVERE_PROCESSING_MS = 120.0
 FAST_SEVERE_FRAME_AGE_MS = 180.0
-FAST_RECOVERY_PROCESSING_MS = 68.0
+FAST_RECOVERY_PROCESSING_MS = 58.0
 FAST_RECOVERY_FRAME_AGE_MS = 100.0
 FAST_RECOVERY_SECONDS = 1.0
 SEGMENT_MEDIUM_MOTION_RATIO = 0.04
 MASK_MOTION_RESET_RATIO = 0.10
 SEGMENT_MAX_REUSE_AGE_MS = 150.0
+SEGMENT_STILL_MAX_REUSE_AGE_MS = 1000.0
 SEGMENT_MODERATE_EVERY_N_FRAMES = 2
 
 
@@ -341,6 +343,7 @@ class HeadSegmenter:
         segment_every_n_frames: int = SEGMENT_EVERY_N_FRAMES,
         ema_alpha: float = MASK_EMA_ALPHA,
         max_reuse_age_ms: float = SEGMENT_MAX_REUSE_AGE_MS,
+        still_max_reuse_age_ms: float = SEGMENT_STILL_MAX_REUSE_AGE_MS,
         medium_motion_ratio: float = SEGMENT_MEDIUM_MOTION_RATIO,
         moderate_motion_interval: int = SEGMENT_MODERATE_EVERY_N_FRAMES,
     ) -> None:
@@ -370,6 +373,7 @@ class HeadSegmenter:
         self._segment_every_n_frames = max(1, segment_every_n_frames)
         self._ema_alpha = float(np.clip(ema_alpha, 0.0, 1.0))
         self._max_reuse_age_ms = max(0.0, float(max_reuse_age_ms))
+        self._still_max_reuse_age_ms = max(self._max_reuse_age_ms, float(still_max_reuse_age_ms))
         self._medium_motion_ratio = max(0.0, float(medium_motion_ratio))
         self._moderate_motion_interval = max(1, int(moderate_motion_interval))
         self._frame_index = 0
@@ -406,12 +410,17 @@ class HeadSegmenter:
             moderate_interval=self._moderate_motion_interval,
         )
         mask_age_ms = (time.perf_counter() - self._last_segmented_perf) * 1000 if self._last_segmented_perf else 0.0
+        max_reuse_age_ms = mask_reuse_age_for_motion(
+            motion_ratio,
+            moving_max_age_ms=self._max_reuse_age_ms,
+            still_max_age_ms=self._still_max_reuse_age_ms,
+        )
         frames_since_segment = self._frame_index - self._last_segment_frame_index
         should_reuse = (
             self._last_masks is not None
             and target_interval > 1
             and frames_since_segment < target_interval
-            and mask_age_ms < self._max_reuse_age_ms
+            and mask_age_ms < max_reuse_age_ms
         )
         if should_reuse:
             shifted_masks = translate_masks(self._last_masks, frame_bgr.shape, motion_shift)
@@ -431,7 +440,6 @@ class HeadSegmenter:
         if self._last_masks is not None and not high_motion:
             previous_masks = translate_masks(self._last_masks, frame_bgr.shape, motion_shift)
             new_masks = ema_masks(previous_masks, new_masks, self._ema_alpha)
-            new_masks = self._with_current_protection(new_masks, frame_bgr.shape, detections)
         self._last_masks = new_masks
         self._last_segmented_perf = time.perf_counter()
         self._last_segment_frame_index = self._frame_index
@@ -655,9 +663,23 @@ class QualityEffectPipeline:
 
 
 class CachedFaceTracker:
-    def __init__(self, tracker: FaceTracker, detect_every_n_frames: int = 2) -> None:
+    def __init__(
+        self,
+        tracker: FaceTracker,
+        detect_every_n_frames: int = 2,
+        *,
+        still_detect_every_n_frames: int | None = None,
+        still_motion_ratio: float = 0.025,
+    ) -> None:
         self._tracker = tracker
         self._detect_every_n_frames = max(1, detect_every_n_frames)
+        self._still_detect_every_n_frames = (
+            self._detect_every_n_frames
+            if still_detect_every_n_frames is None
+            else max(1, still_detect_every_n_frames)
+        )
+        self._still_motion_ratio = max(0.0, float(still_motion_ratio))
+        self._last_motion_ratio = float("inf")
         self._frame_index = 0
         self._last_detections = FaceDetections(faces=())
         self._last_detect_call_perf = 0.0
@@ -668,9 +690,17 @@ class CachedFaceTracker:
     def last_detection_age_ms(self) -> float:
         return self._last_detection_age_ms
 
+    def set_motion_ratio(self, motion_ratio: float) -> None:
+        self._last_motion_ratio = float(motion_ratio)
+
     def detect(self, frame_bgr: np.ndarray) -> FaceDetections:
         self._frame_index += 1
-        if self._last_detections.faces and (self._frame_index - 1) % self._detect_every_n_frames != 0:
+        interval = (
+            self._still_detect_every_n_frames
+            if self._last_motion_ratio <= self._still_motion_ratio
+            else self._detect_every_n_frames
+        )
+        if self._last_detections.faces and (self._frame_index - 1) % interval != 0:
             self._last_detection_age_ms = (
                 self._last_detection_age_at_call_ms + (time.perf_counter() - self._last_detect_call_perf) * 1000
                 if self._last_detect_call_perf
@@ -697,8 +727,15 @@ class FastEffectPipeline:
         width_controller: AdaptiveProcessWidthController | None = None,
     ) -> None:
         base_tracker = tracker or detector or MediaPipeFaceTracker()
-        self.tracker = CachedFaceTracker(base_tracker, detect_every_n_frames=1)
-        self.segmenter = segmenter or HeadSegmenter(segment_every_n_frames=8, ema_alpha=0.72)
+        self.tracker = CachedFaceTracker(
+            base_tracker,
+            detect_every_n_frames=1,
+            still_detect_every_n_frames=2,
+        )
+        self.segmenter = segmenter or HeadSegmenter(
+            segment_every_n_frames=FAST_SEGMENT_EVERY_N_FRAMES,
+            ema_alpha=0.72,
+        )
         self._width_controller = width_controller or AdaptiveProcessWidthController(
             FAST_PROCESS_WIDTH_LEVELS if process_width == FAST_PROCESS_WIDTH else (process_width,)
         )
@@ -751,6 +788,7 @@ class FastEffectPipeline:
         if not np.isfinite(motion_ratio):
             motion_ratio = 1.0
         self._last_motion_ratio = float(motion_ratio)
+        self.tracker.set_motion_ratio(motion_ratio)
         self._last_detection_center, self._last_detection_width = primary_face_motion_reference(detections)
         motion_scale = motion_preview_scale(motion_ratio)
         preview_settings = attenuate_settings_for_motion(settings, motion_scale)
@@ -826,13 +864,8 @@ class FastEffectPipeline:
         )
         blended = blend_by_mask(base, skin_target, skin_strength)
 
-        part_masks = build_part_masks(frame_bgr.shape, detections)
-        cheek = np.clip(part_masks.cheeks[y1:y2, x1:x2] * skin, 0.0, 1.0)
-        if float(np.max(cheek)) > 0.01:
-            blush_target = cv2.addWeighted(blended, 0.76, np.full_like(blended, (166, 140, 255)), 0.24, 0)
-            blended = blend_by_mask(blended, blush_target, cheek * settings.blush * 0.30 * motion_scale)
-
-        bridge = np.clip(part_masks.nose_bridge[y1:y2, x1:x2] * skin, 0.0, 1.0)
+        nose_bridge = build_nose_bridge_mask(frame_bgr.shape, detections)
+        bridge = np.clip(nose_bridge[y1:y2, x1:x2] * skin, 0.0, 1.0)
         if float(np.max(bridge)) > 0.01:
             highlight = cv2.addWeighted(blended, 0.84, np.full_like(blended, (235, 238, 255)), 0.16, 4 * intensity)
             blended = blend_by_mask(blended, highlight, bridge * (0.18 + 0.22 * intensity) * motion_scale)
@@ -840,13 +873,6 @@ class FastEffectPipeline:
         if float(np.max(hair)) > 0.01:
             hair_target = cv2.addWeighted(blended, 0.92, pink, 0.08, 2 * intensity)
             blended = blend_by_mask(blended, hair_target, hair * (0.06 + 0.12 * intensity) * motion_scale)
-
-        for face in detections.faces:
-            blended_full = result.copy()
-            blended_full[y1:y2, x1:x2] = blended
-            blended_full = apply_lip_tint(blended_full, face, settings.lip_tint * intensity * 0.9 * motion_scale)
-            blended_full = apply_eye_sparkle(blended_full, face, settings.eye_sparkle * intensity * motion_scale)
-            blended = blended_full[y1:y2, x1:x2]
 
         result[y1:y2, x1:x2] = blended
         return result
@@ -869,6 +895,8 @@ class EffectPipeline:
         tracker: FaceTracker | None = None,
         detector: FaceTracker | None = None,
         segmenter: HeadSegmenterProtocol | None = None,
+        *,
+        fast_process_width: int = FAST_PROCESS_WIDTH,
     ) -> None:
         self._tracker = tracker or detector
         self._segmenter = segmenter
@@ -876,6 +904,7 @@ class EffectPipeline:
         self._fast_segmenter: HeadSegmenterProtocol | None = segmenter
         self._quality: QualityEffectPipeline | None = None
         self._fast: FastEffectPipeline | None = None
+        self._fast_process_width = fast_process_width
         self._last_motion_ratio = 0.0
         self._last_landmark_age_ms = 0.0
         self._last_mask_age_ms = 0.0
@@ -935,8 +964,15 @@ class EffectPipeline:
     def _ensure_fast(self) -> FastEffectPipeline:
         if self._fast is None:
             if self._fast_segmenter is None:
-                self._fast_segmenter = HeadSegmenter(segment_every_n_frames=8, ema_alpha=0.72)
-            self._fast = FastEffectPipeline(tracker=self._ensure_tracker(), segmenter=self._fast_segmenter)
+                self._fast_segmenter = HeadSegmenter(
+                    segment_every_n_frames=FAST_SEGMENT_EVERY_N_FRAMES,
+                    ema_alpha=0.72,
+                )
+            self._fast = FastEffectPipeline(
+                tracker=self._ensure_tracker(),
+                segmenter=self._fast_segmenter,
+                process_width=self._fast_process_width,
+            )
         return self._fast
 
     def _ensure_tracker(self) -> FaceTracker:
@@ -1122,6 +1158,18 @@ def segment_interval_for_motion(
     if motion_ratio >= medium_motion_ratio:
         return min(base_interval, max(1, int(moderate_interval)))
     return base_interval
+
+
+def mask_reuse_age_for_motion(
+    motion_ratio: float,
+    *,
+    moving_max_age_ms: float = SEGMENT_MAX_REUSE_AGE_MS,
+    still_max_age_ms: float = SEGMENT_STILL_MAX_REUSE_AGE_MS,
+    medium_motion_ratio: float = SEGMENT_MEDIUM_MOTION_RATIO,
+) -> float:
+    if not np.isfinite(motion_ratio) or motion_ratio >= medium_motion_ratio:
+        return max(0.0, float(moving_max_age_ms))
+    return max(float(moving_max_age_ms), float(still_max_age_ms))
 
 
 def motion_preview_scale(motion_ratio: float) -> float:
@@ -1312,33 +1360,56 @@ def translate_masks(
 
 def build_part_masks(image_shape: tuple[int, ...], detections: FaceDetections) -> PartMasks:
     height, width = image_shape[:2]
-    cheeks = np.zeros((height, width), dtype=np.float32)
-    nose = np.zeros((height, width), dtype=np.float32)
-    nose_bridge = np.zeros((height, width), dtype=np.float32)
-    forehead = np.zeros((height, width), dtype=np.float32)
-    chin = np.zeros((height, width), dtype=np.float32)
-    brows = np.zeros((height, width), dtype=np.float32)
-    protected = np.zeros((height, width), dtype=np.float32)
+    cheeks_raw = np.zeros((height, width), dtype=np.uint8)
+    nose_raw = np.zeros((height, width), dtype=np.uint8)
+    nose_bridge_raw = np.zeros((height, width), dtype=np.uint8)
+    forehead_raw = np.zeros((height, width), dtype=np.uint8)
+    chin_raw = np.zeros((height, width), dtype=np.uint8)
+    brows_raw = np.zeros((height, width), dtype=np.uint8)
+    protected_raw = np.zeros((height, width), dtype=np.uint8)
 
     for face in detections.faces:
-        cheeks = np.maximum(cheeks, cheek_masks(image_shape, face))
-        nose = np.maximum(nose, polygon_mask(image_shape, face.nose, blur_sigma=3.0))
-        nose_bridge = np.maximum(nose_bridge, line_mask(image_shape, face.nose_bridge, max(2, face.bbox.width // 36), blur_sigma=3.0))
-        forehead = np.maximum(forehead, forehead_mask(image_shape, face))
-        chin = np.maximum(chin, chin_mask(image_shape, face))
-        brows = np.maximum(brows, polygon_mask(image_shape, face.left_brow, blur_sigma=2.0))
-        brows = np.maximum(brows, polygon_mask(image_shape, face.right_brow, blur_sigma=2.0))
+        cheek_axes = (max(5, face.bbox.width // 7), max(4, face.bbox.height // 12))
+        for cheek in (face.left_cheek, face.right_cheek):
+            cv2.ellipse(cheeks_raw, tuple(map(int, point_center(cheek))), cheek_axes, 0, 0, 360, 255, -1)
+
+        fill_points(nose_raw, face.nose)
+        if len(face.nose_bridge) >= 2:
+            cv2.polylines(
+                nose_bridge_raw,
+                [face.nose_bridge.astype(np.int32)],
+                False,
+                255,
+                thickness=max(2, face.bbox.width // 36),
+                lineType=cv2.LINE_AA,
+            )
+
+        forehead_center = (int(face.bbox.center[0]), int(face.bbox.y + face.bbox.height * 0.24))
+        forehead_axes = (max(5, int(face.bbox.width * 0.28)), max(4, int(face.bbox.height * 0.10)))
+        cv2.ellipse(forehead_raw, forehead_center, forehead_axes, 0, 0, 360, 255, -1)
+        fill_points(forehead_raw, face.forehead)
+
+        chin_center = (int(face.bbox.center[0]), int(face.bbox.y + face.bbox.height * 0.84))
+        chin_axes = (max(5, int(face.bbox.width * 0.26)), max(4, int(face.bbox.height * 0.11)))
+        cv2.ellipse(chin_raw, chin_center, chin_axes, 0, 0, 360, 255, -1)
+        fill_points(chin_raw, face.chin)
+
+        fill_points(brows_raw, face.left_brow)
+        fill_points(brows_raw, face.right_brow)
 
         for box in (face.left_eye, face.right_eye):
             expanded = expand_box(box, image_shape, scale_x=1.75, scale_y=1.95)
-            eye = np.zeros((height, width), dtype=np.uint8)
-            cv2.ellipse(eye, ellipse_from_box(expanded), 255, -1)
-            protected = np.maximum(protected, smooth_mask(eye.astype(np.float32) / 255.0, sigma=3.0))
+            cv2.ellipse(protected_raw, ellipse_from_box(expanded), 255, -1)
         lip_box = expand_box(face.lips, image_shape, scale_x=1.36, scale_y=1.52)
-        lip = np.zeros((height, width), dtype=np.uint8)
-        cv2.ellipse(lip, ellipse_from_box(lip_box), 255, -1)
-        protected = np.maximum(protected, smooth_mask(lip.astype(np.float32) / 255.0, sigma=3.0))
+        cv2.ellipse(protected_raw, ellipse_from_box(lip_box), 255, -1)
 
+    cheeks = smooth_mask(cheeks_raw.astype(np.float32) / 255.0, sigma=6.0)
+    nose = smooth_mask(nose_raw.astype(np.float32) / 255.0, sigma=3.0)
+    nose_bridge = smooth_mask(nose_bridge_raw.astype(np.float32) / 255.0, sigma=3.0)
+    forehead = smooth_mask(forehead_raw.astype(np.float32) / 255.0, sigma=5.0)
+    chin = smooth_mask(chin_raw.astype(np.float32) / 255.0, sigma=5.0)
+    brows = smooth_mask(brows_raw.astype(np.float32) / 255.0, sigma=2.0)
+    protected = smooth_mask(protected_raw.astype(np.float32) / 255.0, sigma=3.0)
     protected = np.clip(np.maximum(protected, brows), 0.0, 1.0).astype(np.float32)
     return PartMasks(
         cheeks=cheeks,
@@ -1349,6 +1420,31 @@ def build_part_masks(image_shape: tuple[int, ...], detections: FaceDetections) -
         brows=brows,
         protected=protected,
     )
+
+
+def build_nose_bridge_mask(image_shape: tuple[int, ...], detections: FaceDetections) -> np.ndarray:
+    height, width = image_shape[:2]
+    raw = np.zeros((height, width), dtype=np.uint8)
+    for face in detections.faces:
+        if len(face.nose_bridge) >= 2:
+            cv2.polylines(
+                raw,
+                [face.nose_bridge.astype(np.int32)],
+                False,
+                255,
+                thickness=max(2, face.bbox.width // 36),
+                lineType=cv2.LINE_AA,
+            )
+    return smooth_mask(raw.astype(np.float32) / 255.0, sigma=3.0)
+
+
+def fill_points(mask: np.ndarray, points: np.ndarray) -> None:
+    if len(points) >= 3:
+        cv2.fillConvexPoly(mask, cv2.convexHull(points.astype(np.int32)), 255, lineType=cv2.LINE_AA)
+    elif len(points) == 2:
+        cv2.line(mask, tuple(points[0].astype(int)), tuple(points[1].astype(int)), 255, 2, lineType=cv2.LINE_AA)
+    elif len(points) == 1:
+        cv2.circle(mask, tuple(points[0].astype(int)), 2, 255, -1, lineType=cv2.LINE_AA)
 
 
 def build_face_skin_mask(frame_bgr: np.ndarray, detections: FaceDetections | tuple[DetectionBox, ...]) -> np.ndarray:
@@ -1875,6 +1971,28 @@ def point_center(points: np.ndarray) -> tuple[float, float]:
 def blend_by_mask(base_bgr: np.ndarray, overlay_bgr: np.ndarray, mask: np.ndarray) -> np.ndarray:
     if mask.ndim == 2:
         mask = mask[:, :, None]
+    active = mask[:, :, 0] if mask.shape[2] == 1 else np.max(mask, axis=2)
+    active_uint8 = (active > 1e-4).astype(np.uint8)
+    if int(cv2.countNonZero(active_uint8)) == 0:
+        return base_bgr
+
+    x, y, width, height = cv2.boundingRect(active_uint8)
+    full_height, full_width = base_bgr.shape[:2]
+    if width * height >= full_width * full_height * 0.80:
+        return blend_arrays(base_bgr, overlay_bgr, mask)
+
+    result = base_bgr.copy()
+    y2 = y + height
+    x2 = x + width
+    result[y:y2, x:x2] = blend_arrays(
+        base_bgr[y:y2, x:x2],
+        overlay_bgr[y:y2, x:x2],
+        mask[y:y2, x:x2],
+    )
+    return result
+
+
+def blend_arrays(base_bgr: np.ndarray, overlay_bgr: np.ndarray, mask: np.ndarray) -> np.ndarray:
     blended = base_bgr.astype(np.float32) * (1.0 - mask) + overlay_bgr.astype(np.float32) * mask
     return np.clip(blended, 0, 255).astype(np.uint8)
 

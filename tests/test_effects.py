@@ -1,6 +1,7 @@
 import time
 from types import SimpleNamespace
 
+import cv2
 import numpy as np
 import pytest
 from pydantic import ValidationError
@@ -27,7 +28,9 @@ from purikura_test.effects import (
     apply_doll_lip_gloss,
     apply_porcelain_skin,
     apply_soft_glow,
+    blend_by_mask,
     build_face_skin_mask,
+    build_nose_bridge_mask,
     build_part_masks,
     CachedFaceTracker,
     draw_debug_overlay,
@@ -44,6 +47,7 @@ from purikura_test.effects import (
     local_zoom,
     masks_from_segmenter_result,
     motion_preview_scale,
+    mask_reuse_age_for_motion,
     primary_face_motion_reference,
     segment_interval_for_motion,
     translate_masks,
@@ -156,6 +160,7 @@ def fake_head_segmenter(
     segmenter._segment_every_n_frames = segment_every_n_frames
     segmenter._ema_alpha = 0.0
     segmenter._max_reuse_age_ms = max_reuse_age_ms
+    segmenter._still_max_reuse_age_ms = max_reuse_age_ms
     segmenter._medium_motion_ratio = SEGMENT_MEDIUM_MOTION_RATIO
     segmenter._moderate_motion_interval = SEGMENT_MODERATE_EVERY_N_FRAMES
     segmenter._frame_index = 0
@@ -220,6 +225,19 @@ def test_alpha_composite_resizes_and_applies_alpha() -> None:
     assert result.shape == base.shape
     assert np.all(result[:, :, 2] == 255)
     assert np.all(result[:, :, :2] == 0)
+
+
+def test_sparse_mask_blend_changes_only_active_roi() -> None:
+    base = np.full((80, 100, 3), 40, dtype=np.uint8)
+    overlay = np.full_like(base, 220)
+    mask = np.zeros((80, 100), dtype=np.float32)
+    mask[30:42, 45:60] = 0.5
+
+    result = blend_by_mask(base, overlay, mask)
+
+    assert np.array_equal(result[:20], base[:20])
+    assert np.array_equal(result[:, :30], base[:, :30])
+    assert np.all(result[32:40, 48:58] == 130)
 
 
 def test_normalized_landmarks_build_face_and_eye_boxes() -> None:
@@ -296,6 +314,21 @@ def test_fast_effect_pipeline_keeps_source_shape_with_frame_asset() -> None:
     assert result.shape == base.shape
     assert result.dtype == np.uint8
     assert not np.array_equal(result, base)
+
+
+def test_effect_pipeline_accepts_fixed_fast_process_width() -> None:
+    base = np.full((360, 640, 3), 82, dtype=np.uint8)
+    detections = synthetic_face((252, 448, 3))
+    pipeline = EffectPipeline(
+        tracker=StaticTracker(detections),
+        segmenter=DynamicSegmenter(),
+        fast_process_width=448,
+    )
+
+    result = pipeline.apply(base, EffectSettings(processing_profile="fast"))
+
+    assert result.shape == base.shape
+    assert pipeline.fast_process_width == 448
 
 
 def test_effect_settings_validation_bounds() -> None:
@@ -383,6 +416,23 @@ def test_part_masks_for_nose_cheeks_forehead_and_chin() -> None:
     assert np.max(parts.chin) > 0.1
 
 
+def test_lightweight_nose_bridge_mask_supports_multiple_faces() -> None:
+    image_shape = (160, 160, 3)
+    detections = FaceDetections(
+        faces=(
+            face_geometry_from_box(DetectionBox(8, 14, 68, 128), image_shape),
+            face_geometry_from_box(DetectionBox(84, 14, 68, 128), image_shape),
+        )
+    )
+
+    mask = build_nose_bridge_mask(image_shape, detections)
+
+    assert mask.shape == image_shape[:2]
+    assert mask.dtype == np.float32
+    assert np.max(mask[:, :80]) > 0.1
+    assert np.max(mask[:, 80:]) > 0.1
+
+
 def test_cached_face_tracker_skips_intermediate_frames() -> None:
     frame = np.zeros((120, 160, 3), dtype=np.uint8)
     tracker = CountingTracker(synthetic_face(frame.shape))
@@ -390,6 +440,25 @@ def test_cached_face_tracker_skips_intermediate_frames() -> None:
 
     for _ in range(5):
         assert cached.detect(frame).faces
+
+    assert tracker.calls == 3
+
+
+def test_cached_face_tracker_skips_one_frame_only_while_still() -> None:
+    frame = np.zeros((120, 160, 3), dtype=np.uint8)
+    tracker = CountingTracker(synthetic_face(frame.shape))
+    cached = CachedFaceTracker(
+        tracker,
+        detect_every_n_frames=1,
+        still_detect_every_n_frames=2,
+    )
+
+    cached.detect(frame)
+    cached.set_motion_ratio(0.0)
+    cached.detect(frame)
+    cached.detect(frame)
+    cached.set_motion_ratio(0.08)
+    cached.detect(frame)
 
     assert tracker.calls == 3
 
@@ -438,6 +507,36 @@ def test_segment_interval_for_motion_adapts_to_face_movement() -> None:
     assert segment_interval_for_motion(float("inf"), 8) == 1
 
 
+def test_mask_reuse_age_is_longer_only_while_face_is_still() -> None:
+    assert mask_reuse_age_for_motion(0.01) == 1000.0
+    assert mask_reuse_age_for_motion(0.05) == 150.0
+    assert mask_reuse_age_for_motion(float("inf")) == 150.0
+
+
+def test_part_masks_blur_once_per_mask_type_for_multiple_faces(monkeypatch) -> None:
+    image_shape = (160, 160, 3)
+    detections = FaceDetections(
+        faces=(
+            face_geometry_from_box(DetectionBox(8, 14, 68, 128), image_shape),
+            face_geometry_from_box(DetectionBox(84, 14, 68, 128), image_shape),
+        )
+    )
+    calls = 0
+    original = cv2.GaussianBlur
+
+    def counting_blur(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(cv2, "GaussianBlur", counting_blur)
+    parts = build_part_masks(image_shape, detections)
+
+    assert calls == 7
+    assert np.max(parts.cheeks) > 0.1
+    assert np.max(parts.protected) > 0.1
+
+
 def test_adaptive_process_width_uses_hysteresis_and_recovers_gradually() -> None:
     controller = AdaptiveProcessWidthController(overload_samples=2, recovery_seconds=1.0)
 
@@ -447,11 +546,10 @@ def test_adaptive_process_width_uses_hysteresis_and_recovers_gradually() -> None
     assert controller.current_width == 512
     assert controller.observe(processing_ms=130, frame_age_ms=150, now=0.2)
     assert controller.current_width == 448
-
-    assert not controller.observe(processing_ms=55, frame_age_ms=80, now=1.0)
-    assert controller.observe(processing_ms=55, frame_age_ms=80, now=2.1)
+    assert not controller.observe(processing_ms=50, frame_age_ms=80, now=1.0)
+    assert controller.observe(processing_ms=50, frame_age_ms=80, now=2.1)
     assert controller.current_width == 512
-    assert controller.observe(processing_ms=55, frame_age_ms=80, now=3.2)
+    assert controller.observe(processing_ms=50, frame_age_ms=80, now=3.2)
     assert controller.current_width == 640
 
 
@@ -533,6 +631,8 @@ def test_fast_pipeline_records_motion_ratio_for_preview() -> None:
     settings = EffectSettings(processing_profile="fast")
 
     pipeline.apply(frame, settings)
+    pipeline.apply(frame, settings)
+    assert pipeline.last_motion_ratio == 0.0
     pipeline.apply(frame, settings)
 
     assert pipeline.last_motion_ratio > 0.20
