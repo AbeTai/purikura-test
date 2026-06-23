@@ -15,6 +15,10 @@ from purikura_test.effects import EffectPipeline, FrameAsset
 from purikura_test.repository import CaptureRepository
 
 
+CAMERA_READ_INTERVAL_SECONDS = 1 / 30
+MAX_PREVIEW_STALL_SECONDS = 0.6
+
+
 @dataclass
 class EncodedFrame:
     blob: bytes
@@ -51,6 +55,7 @@ class PurikuraRuntime:
         self._latest_jpeg: bytes | None = None
         self._next_frame_id = 0
         self._latest_raw_frame_id = 0
+        self._last_publish_at = 0.0
         self._performance = PerformanceSummary()
         self._lock = threading.RLock()
         self._pipeline_lock = threading.Lock()
@@ -166,6 +171,7 @@ class PurikuraRuntime:
 
     def _read_loop(self) -> None:
         while not self._stop.is_set():
+            loop_started = time.perf_counter()
             raw = self.camera.read()
             if raw is None:
                 time.sleep(0.05)
@@ -180,7 +186,8 @@ class PurikuraRuntime:
                 packet = FramePacket(id=self._next_frame_id, captured_at=captured_at, frame=raw)
                 self._latest_raw_packet = packet
                 self._pending_frame = packet
-            time.sleep(0.001)
+            elapsed = time.perf_counter() - loop_started
+            time.sleep(max(0.001, CAMERA_READ_INTERVAL_SECONDS - elapsed))
 
     def _process_loop(self) -> None:
         while not self._stop.is_set():
@@ -195,13 +202,21 @@ class PurikuraRuntime:
 
             started = time.perf_counter()
             pipeline = self._ensure_pipeline()
-            with self._pipeline_apply_lock:
-                processed = pipeline.apply(packet.frame, settings, frame_asset)
-                motion_factor = pipeline.last_motion_ratio
+            try:
+                with self._pipeline_apply_lock:
+                    processed = pipeline.apply(packet.frame, settings, frame_asset)
+                    motion_factor = pipeline.last_motion_ratio
+            except Exception as exc:  # pragma: no cover - keeps the preview thread alive in production
+                print(f"Frame processing failed: {exc}")
+                with self._lock:
+                    self._performance.discarded_processed_frames += 1
+                    self._performance.profile = settings.processing_profile
+                time.sleep(0.05)
+                continue
             processed_at = time.perf_counter()
             processing_ms = (processed_at - started) * 1000
             with self._lock:
-                if not self._is_packet_fresh_for_publish(packet, settings):
+                if not self._is_packet_fresh_for_publish(packet, settings, now=processed_at):
                     self._performance.discarded_processed_frames += 1
                     self._performance.processing_ms = processing_ms
                     self._performance.encode_ms = 0.0
@@ -216,6 +231,7 @@ class PurikuraRuntime:
             with self._lock:
                 self._latest_processed = processed
                 self._latest_jpeg = encoded.tobytes() if ok else None
+                self._last_publish_at = time.perf_counter()
                 self._performance.processing_ms = processing_ms
                 self._performance.encode_ms = encode_ms
                 self._performance.effective_fps = 1000 / processing_ms if processing_ms > 0 else 0.0
@@ -224,8 +240,24 @@ class PurikuraRuntime:
                 self._performance.published_frame_id = packet.id
                 self._performance.profile = settings.processing_profile
 
-    def _is_packet_fresh_for_publish(self, packet: FramePacket, settings: EffectSettings) -> bool:
-        return self._latest_raw_frame_id - packet.id <= max_publish_lag_frames(settings)
+    def _is_packet_fresh_for_publish(
+        self,
+        packet: FramePacket,
+        settings: EffectSettings,
+        *,
+        now: float | None = None,
+    ) -> bool:
+        now = time.perf_counter() if now is None else now
+        if self._latest_processed is None:
+            return True
+        if now - self._last_publish_at >= MAX_PREVIEW_STALL_SECONDS:
+            return True
+        frame_lag = self._latest_raw_frame_id - packet.id
+        frame_age_seconds = now - packet.captured_at
+        return (
+            frame_lag <= max_publish_lag_frames(settings)
+            or frame_age_seconds <= max_publish_age_seconds(settings)
+        )
 
     def _ensure_pipeline(self) -> EffectPipeline:
         if self._pipeline is not None:
@@ -237,7 +269,11 @@ class PurikuraRuntime:
 
 
 def max_publish_lag_frames(settings: EffectSettings) -> int:
-    return 1 if settings.processing_profile == "fast" else 2
+    return 6 if settings.processing_profile == "fast" else 10
+
+
+def max_publish_age_seconds(settings: EffectSettings) -> float:
+    return 0.45 if settings.processing_profile == "fast" else 0.9
 
 
 def decode_png_to_bgra(image_blob: bytes) -> np.ndarray:

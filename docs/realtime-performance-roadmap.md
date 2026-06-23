@@ -66,6 +66,7 @@
 - 撮影保存では最新rawフレームを固定し、`processing_profile="quality"` にした設定で再処理してDBへ保存する。
 - 起動直後のpreviewは `processing_profile="fast"` を初期値にして、最初の表示が重いQuality処理で詰まらないようにしている。
 - `/api/cameras` は現在使用中のカメラを再Openせず、macOS/OpenCVで起動中キャプチャを不安定にしないようにしている。
+- Mac内蔵カメラ向けにread loopを約30fpsへ抑制し、preview publish判定はフレームIDだけでなく経過時間も併用している。一定時間publishが止まった場合は次の加工フレームを通し、静止画化を避ける。
 
 残る課題:
 

@@ -5,7 +5,7 @@ import numpy as np
 
 from purikura_test.api_models import EffectSettings
 from purikura_test.repository import CaptureRepository
-from purikura_test.runtime import FramePacket, PurikuraRuntime, max_publish_lag_frames
+from purikura_test.runtime import FramePacket, PurikuraRuntime, max_publish_age_seconds, max_publish_lag_frames
 
 
 class RecordingPipeline:
@@ -20,20 +20,38 @@ class RecordingPipeline:
 
 
 def test_max_publish_lag_frames_prefers_fresh_fast_preview() -> None:
-    assert max_publish_lag_frames(EffectSettings(processing_profile="fast")) == 1
-    assert max_publish_lag_frames(EffectSettings(processing_profile="quality")) == 2
+    assert max_publish_lag_frames(EffectSettings(processing_profile="fast")) == 6
+    assert max_publish_lag_frames(EffectSettings(processing_profile="quality")) == 10
+    assert max_publish_age_seconds(EffectSettings(processing_profile="fast")) == 0.45
+    assert max_publish_age_seconds(EffectSettings(processing_profile="quality")) == 0.9
 
 
-def test_runtime_rejects_stale_processed_packet() -> None:
+def test_runtime_publish_freshness_uses_lag_and_age() -> None:
     runtime = PurikuraRuntime(CaptureRepository("sqlite:///:memory:"))
-    packet = FramePacket(id=1, captured_at=time.perf_counter(), frame=np.zeros((2, 2, 3), dtype=np.uint8))
+    runtime._latest_processed = np.zeros((2, 2, 3), dtype=np.uint8)
+    runtime._last_publish_at = 99.8
+    runtime._latest_raw_frame_id = 20
 
-    runtime._latest_raw_frame_id = 2
-    assert runtime._is_packet_fresh_for_publish(packet, EffectSettings(processing_profile="fast"))
+    fresh_by_age = FramePacket(id=1, captured_at=99.7, frame=np.zeros((2, 2, 3), dtype=np.uint8))
+    assert runtime._is_packet_fresh_for_publish(
+        fresh_by_age,
+        EffectSettings(processing_profile="fast"),
+        now=100.0,
+    )
 
-    runtime._latest_raw_frame_id = 3
-    assert not runtime._is_packet_fresh_for_publish(packet, EffectSettings(processing_profile="fast"))
-    assert runtime._is_packet_fresh_for_publish(packet, EffectSettings(processing_profile="quality"))
+    stale = FramePacket(id=1, captured_at=99.0, frame=np.zeros((2, 2, 3), dtype=np.uint8))
+    assert not runtime._is_packet_fresh_for_publish(stale, EffectSettings(processing_profile="fast"), now=100.0)
+    assert not runtime._is_packet_fresh_for_publish(stale, EffectSettings(processing_profile="quality"), now=100.0)
+
+
+def test_runtime_allows_publish_after_preview_stall() -> None:
+    runtime = PurikuraRuntime(CaptureRepository("sqlite:///:memory:"))
+    runtime._latest_processed = np.zeros((2, 2, 3), dtype=np.uint8)
+    runtime._last_publish_at = 99.0
+    runtime._latest_raw_frame_id = 20
+    packet = FramePacket(id=1, captured_at=99.0, frame=np.zeros((2, 2, 3), dtype=np.uint8))
+
+    assert runtime._is_packet_fresh_for_publish(packet, EffectSettings(processing_profile="fast"), now=100.0)
 
 
 def test_capture_current_reprocesses_latest_raw_with_quality_profile() -> None:
