@@ -56,6 +56,9 @@ def test_app_core_api_flow(monkeypatch) -> None:
         assert performance.status_code == 200
         assert performance.json()["profile"] in {"quality", "fast"}
         assert isinstance(performance.json()["dropped_frames"], int)
+        assert isinstance(performance.json()["discarded_processed_frames"], int)
+        assert isinstance(performance.json()["frame_age_ms"], float)
+        assert isinstance(performance.json()["latest_raw_frame_id"], int)
 
         invalid_effects = client.put(
             "/api/effects",

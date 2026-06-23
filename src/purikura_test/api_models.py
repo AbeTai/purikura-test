@@ -133,4 +133,8 @@ class PerformanceSummary(BaseModel):
     encode_ms: float = 0.0
     effective_fps: float = 0.0
     dropped_frames: int = 0
+    discarded_processed_frames: int = 0
+    frame_age_ms: float = 0.0
+    published_frame_id: int = 0
+    latest_raw_frame_id: int = 0
     profile: Literal["quality", "fast"] = "quality"

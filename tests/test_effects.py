@@ -29,11 +29,13 @@ from purikura_test.effects import (
     empty_masks,
     face_geometry_from_box,
     face_geometry_from_normalized_landmarks,
+    detection_motion_ratio,
     head_roi,
     local_eye_round,
     local_translate,
     local_zoom,
     masks_from_segmenter_result,
+    primary_face_motion_reference,
 )
 
 
@@ -84,6 +86,10 @@ class FakeSegmenterResult:
 
 def synthetic_face(image_shape: tuple[int, int, int] = (160, 120, 3)) -> FaceDetections:
     return FaceDetections(faces=(face_geometry_from_box(DetectionBox(18, 14, 84, 128), image_shape),))
+
+
+def synthetic_face_at(box: DetectionBox, image_shape: tuple[int, int, int] = (160, 120, 3)) -> FaceDetections:
+    return FaceDetections(faces=(face_geometry_from_box(box, image_shape),))
 
 
 def synthetic_masks(image_shape: tuple[int, int, int], detections: FaceDetections | None = None) -> SegmentationMasks:
@@ -277,6 +283,18 @@ def test_cached_face_tracker_skips_intermediate_frames() -> None:
         assert cached.detect(frame).faces
 
     assert tracker.calls == 3
+
+
+def test_detection_motion_ratio_tracks_face_center_movement() -> None:
+    previous = synthetic_face_at(DetectionBox(20, 20, 80, 100))
+    moved = synthetic_face_at(DetectionBox(44, 20, 80, 100))
+    previous_center, previous_width = primary_face_motion_reference(previous)
+
+    ratio = detection_motion_ratio(moved, previous_center, previous_width)
+    missing_ratio = detection_motion_ratio(FaceDetections(faces=()), previous_center, previous_width)
+
+    assert ratio > 0.20
+    assert missing_ratio == float("inf")
 
 
 def test_head_roi_uses_face_and_mask_bounds() -> None:

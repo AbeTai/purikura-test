@@ -79,6 +79,7 @@ SEG_OTHERS = 5
 SEGMENT_EVERY_N_FRAMES = 4
 MASK_EMA_ALPHA = 0.65
 FAST_PROCESS_WIDTH = 640
+MASK_MOTION_RESET_RATIO = 0.10
 
 
 @dataclass(frozen=True)
@@ -181,7 +182,7 @@ class HeadSegmenterProtocol(Protocol):
 
 
 class MediaPipeFaceTracker:
-    def __init__(self, model_path: str | Path | None = None, max_cached_seconds: float = 0.25) -> None:
+    def __init__(self, model_path: str | Path | None = None, max_cached_seconds: float = 0.10) -> None:
         resolved_model_path = Path(
             model_path
             or os.getenv("PURIKURA_FACE_LANDMARKER_MODEL", "")
@@ -270,10 +271,19 @@ class HeadSegmenter:
         self._frame_index = 0
         self._last_timestamp_ms = 0
         self._last_masks: SegmentationMasks | None = None
+        self._last_detection_center: tuple[float, float] | None = None
+        self._last_detection_width: float | None = None
 
     def segment(self, frame_bgr: np.ndarray, detections: FaceDetections) -> SegmentationMasks:
         self._frame_index += 1
-        if self._last_masks is not None and (self._frame_index - 1) % self._segment_every_n_frames != 0:
+        motion_ratio = detection_motion_ratio(detections, self._last_detection_center, self._last_detection_width)
+        high_motion = motion_ratio > MASK_MOTION_RESET_RATIO
+        should_reuse = (
+            self._last_masks is not None
+            and not high_motion
+            and (self._frame_index - 1) % self._segment_every_n_frames != 0
+        )
+        if should_reuse:
             return self._with_current_protection(self._last_masks, frame_bgr.shape, detections)
 
         timestamp_ms = max(int(time.monotonic() * 1000), self._last_timestamp_ms + 1)
@@ -283,10 +293,11 @@ class HeadSegmenter:
         mp_image = self._mp.Image(image_format=self._mp.ImageFormat.SRGB, data=np.ascontiguousarray(rgb))
         result = self._segmenter.segment_for_video(mp_image, timestamp_ms)
         new_masks = masks_from_segmenter_result(result, frame_bgr.shape, detections)
-        if self._last_masks is not None:
+        if self._last_masks is not None and not high_motion:
             new_masks = ema_masks(self._last_masks, new_masks, self._ema_alpha)
             new_masks = self._with_current_protection(new_masks, frame_bgr.shape, detections)
         self._last_masks = new_masks
+        self._last_detection_center, self._last_detection_width = primary_face_motion_reference(detections)
         return new_masks
 
     @staticmethod
@@ -799,6 +810,29 @@ def face_geometry_from_box(box: DetectionBox, image_shape: tuple[int, ...]) -> F
     for index, angle in zip(LIP_INNER, np.linspace(0, np.pi * 2, len(LIP_INNER), endpoint=False)):
         points[index] = [x + w * 0.5 + np.cos(angle) * w * 0.09, y + h * 0.72 + np.sin(angle) * h * 0.035]
     return face_geometry_from_points(points, image_shape)
+
+
+def primary_face_motion_reference(detections: FaceDetections) -> tuple[tuple[float, float] | None, float | None]:
+    if not detections.faces:
+        return None, None
+    primary = max(detections.faces, key=lambda face: face.bbox.width * face.bbox.height)
+    return primary.bbox.center, float(max(1, primary.bbox.width))
+
+
+def detection_motion_ratio(
+    detections: FaceDetections,
+    previous_center: tuple[float, float] | None,
+    previous_width: float | None,
+) -> float:
+    current_center, current_width = primary_face_motion_reference(detections)
+    if current_center is None:
+        return float("inf") if previous_center is not None else 0.0
+    if previous_center is None:
+        return 0.0
+    width = max(1.0, float(previous_width or current_width or 1.0))
+    dx = current_center[0] - previous_center[0]
+    dy = current_center[1] - previous_center[1]
+    return float(np.sqrt(dx * dx + dy * dy) / width)
 
 
 def points_for_indices(points: np.ndarray, indices: tuple[int, ...]) -> np.ndarray:
