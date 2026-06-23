@@ -63,7 +63,8 @@ def create_app(
 
     @app.get("/api/cameras", response_model=list[CameraInfo])
     def cameras() -> list[CameraInfo]:
-        return discover_cameras()
+        active_camera_id = app_runtime.camera_id if app_runtime.is_running else None
+        return discover_cameras(active_camera_id=active_camera_id)
 
     @app.put("/api/camera", response_model=CameraInfo)
     def select_camera(selection: CameraSelection) -> CameraInfo:

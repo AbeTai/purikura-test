@@ -19,7 +19,7 @@ class CameraSelection(BaseModel):
 class EffectSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    processing_profile: Literal["quality", "fast"] = "quality"
+    processing_profile: Literal["quality", "fast"] = "fast"
     skin_smoothing: float = Field(default=0.78, ge=0.0, le=1.0)
     purikura_intensity: float = Field(default=0.86, ge=0.0, le=1.0)
     eye_enlarge: float = Field(default=0.30, ge=0.0, le=0.6)

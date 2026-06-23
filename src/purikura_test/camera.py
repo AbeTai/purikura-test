@@ -59,9 +59,24 @@ class OpenCVCameraSource:
 MacBuiltinCameraSource = OpenCVCameraSource
 
 
-def discover_cameras(max_index: int = 5, probe_seconds: float = 0.2) -> list[CameraInfo]:
+def discover_cameras(
+    max_index: int = 5,
+    probe_seconds: float = 0.2,
+    *,
+    active_camera_id: int | None = None,
+) -> list[CameraInfo]:
     cameras: list[CameraInfo] = []
     for camera_id in range(max_index):
+        if camera_id == active_camera_id:
+            cameras.append(
+                CameraInfo(
+                    id=camera_id,
+                    name=("Built-in camera" if camera_id == 0 else f"Camera {camera_id}"),
+                    available=True,
+                )
+            )
+            continue
+
         capture = cv2.VideoCapture(camera_id)
         try:
             time.sleep(probe_seconds)

@@ -64,6 +64,8 @@
 - Fast previewでは顔ランドマークを毎フレーム更新している。
 - Fast previewではmotionに応じてエフェクト強度を減衰する。
 - 撮影保存では最新rawフレームを固定し、`processing_profile="quality"` にした設定で再処理してDBへ保存する。
+- 起動直後のpreviewは `processing_profile="fast"` を初期値にして、最初の表示が重いQuality処理で詰まらないようにしている。
+- `/api/cameras` は現在使用中のカメラを再Openせず、macOS/OpenCVで起動中キャプチャを不安定にしないようにしている。
 
 残る課題:
 

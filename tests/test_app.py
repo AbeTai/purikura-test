@@ -29,10 +29,19 @@ class PassthroughPipeline:
         return frame_bgr.copy()
 
 
+class FakeAliveThread:
+    def is_alive(self) -> bool:
+        return True
+
+    def join(self, timeout: float | None = None) -> None:
+        return None
+
+
 def test_app_core_api_flow(monkeypatch) -> None:
     repository = CaptureRepository("sqlite:///:memory:")
     pipeline = PassthroughPipeline()
     runtime = PurikuraRuntime(repository, pipeline=pipeline)
+    runtime._camera_thread = FakeAliveThread()
     runtime._latest_raw_packet = FramePacket(
         id=1,
         captured_at=time.perf_counter(),
@@ -43,13 +52,17 @@ def test_app_core_api_flow(monkeypatch) -> None:
 
     monkeypatch.setattr(
         "purikura_test.app.discover_cameras",
-        lambda: [CameraInfo(id=0, name="Built-in camera", available=True)],
+        lambda **kwargs: [CameraInfo(id=kwargs["active_camera_id"], name="Built-in camera", available=True)],
     )
 
     with TestClient(app) as client:
         cameras = client.get("/api/cameras")
         assert cameras.status_code == 200
         assert cameras.json()[0]["id"] == 0
+
+        current_effects = client.get("/api/effects")
+        assert current_effects.status_code == 200
+        assert current_effects.json()["processing_profile"] == "fast"
 
         effects = client.put(
             "/api/effects",

@@ -63,8 +63,12 @@ class PurikuraRuntime:
     def camera_id(self) -> int:
         return self.camera.camera_id
 
+    @property
+    def is_running(self) -> bool:
+        return self._camera_thread is not None and self._camera_thread.is_alive()
+
     def start(self) -> None:
-        if self._camera_thread is not None and self._camera_thread.is_alive():
+        if self.is_running:
             return
         self._ensure_pipeline()
         self._stop.clear()
@@ -86,7 +90,7 @@ class PurikuraRuntime:
 
     def switch_camera(self, camera_id: int) -> None:
         with self._lock:
-            was_running = self._camera_thread is not None and self._camera_thread.is_alive()
+            was_running = self.is_running
         if was_running:
             self.stop()
         self.camera = OpenCVCameraSource(camera_id)
