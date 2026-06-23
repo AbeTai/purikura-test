@@ -4,6 +4,7 @@ const frameSelect = document.querySelector("#frame-select");
 const frameUpload = document.querySelector("#frame-upload");
 const captureButton = document.querySelector("#capture-button");
 const capturesEl = document.querySelector("#captures");
+const performanceEl = document.querySelector("#performance");
 
 const controls = {
   processing_profile: document.querySelector("#processing-profile"),
@@ -18,6 +19,39 @@ const controls = {
 
 function setStatus(message) {
   statusEl.textContent = message;
+}
+
+function formatMs(value) {
+  return `${Number(value || 0).toFixed(0)}ms`;
+}
+
+function renderPerformance(performance) {
+  const metrics = [
+    ["Profile", performance.profile],
+    ["Process", formatMs(performance.processing_ms)],
+    ["Encode", formatMs(performance.encode_ms)],
+    ["FPS", Number(performance.effective_fps || 0).toFixed(1)],
+    ["Frame age", formatMs(performance.frame_age_ms)],
+    ["Landmark age", formatMs(performance.landmark_age_ms)],
+    ["Mask age", formatMs(performance.mask_age_ms)],
+    ["Publish gap", formatMs(performance.publish_interval_ms)],
+    ["Stall", formatMs(performance.preview_stall_ms)],
+    ["Lag frames", String(performance.publish_lag_frames || 0)],
+    ["Dropped", String(performance.dropped_frames || 0)],
+    ["Discarded", String(performance.discarded_processed_frames || 0)],
+  ];
+  performanceEl.replaceChildren(
+    ...metrics.map(([label, value]) => {
+      const item = document.createElement("div");
+      item.className = "metric";
+      const name = document.createElement("span");
+      name.textContent = label;
+      const metricValue = document.createElement("strong");
+      metricValue.textContent = value;
+      item.append(name, metricValue);
+      return item;
+    }),
+  );
 }
 
 async function requestJson(url, options = {}) {
@@ -101,6 +135,11 @@ async function loadCaptures() {
   }
 }
 
+async function loadPerformance() {
+  const performance = await requestJson("/api/performance");
+  renderPerformance(performance);
+}
+
 for (const input of Object.values(controls)) {
   const eventName = input.tagName === "SELECT" ? "change" : "input";
   input.addEventListener(eventName, async () => {
@@ -167,7 +206,10 @@ captureButton.addEventListener("click", async () => {
 });
 
 try {
-  await Promise.all([loadCameras(), loadEffects(), loadFrames(), loadCaptures()]);
+  await Promise.all([loadCameras(), loadEffects(), loadFrames(), loadCaptures(), loadPerformance()]);
+  window.setInterval(() => {
+    loadPerformance().catch(() => {});
+  }, 1000);
   setStatus("Ready");
 } catch (error) {
   setStatus(error.message);

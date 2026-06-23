@@ -135,7 +135,12 @@ class PerformanceSummary(BaseModel):
     dropped_frames: int = 0
     discarded_processed_frames: int = 0
     frame_age_ms: float = 0.0
+    landmark_age_ms: float = 0.0
+    mask_age_ms: float = 0.0
     motion_factor: float = 0.0
+    publish_interval_ms: float = 0.0
+    publish_lag_frames: int = 0
+    preview_stall_ms: float = 0.0
     published_frame_id: int = 0
     latest_raw_frame_id: int = 0
     profile: Literal["quality", "fast"] = "quality"

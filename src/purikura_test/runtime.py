@@ -206,6 +206,8 @@ class PurikuraRuntime:
                 with self._pipeline_apply_lock:
                     processed = pipeline.apply(packet.frame, settings, frame_asset)
                     motion_factor = pipeline.last_motion_ratio
+                    landmark_age_ms = float(getattr(pipeline, "last_landmark_age_ms", 0.0))
+                    mask_age_ms = float(getattr(pipeline, "last_mask_age_ms", 0.0))
             except Exception as exc:  # pragma: no cover - keeps the preview thread alive in production
                 print(f"Frame processing failed: {exc}")
                 with self._lock:
@@ -216,27 +218,40 @@ class PurikuraRuntime:
             processed_at = time.perf_counter()
             processing_ms = (processed_at - started) * 1000
             with self._lock:
+                publish_lag_frames = self._latest_raw_frame_id - packet.id
+                preview_stall_ms = (processed_at - self._last_publish_at) * 1000 if self._last_publish_at else 0.0
                 if not self._is_packet_fresh_for_publish(packet, settings, now=processed_at):
                     self._performance.discarded_processed_frames += 1
                     self._performance.processing_ms = processing_ms
                     self._performance.encode_ms = 0.0
                     self._performance.effective_fps = 1000 / processing_ms if processing_ms > 0 else 0.0
                     self._performance.frame_age_ms = (time.perf_counter() - packet.captured_at) * 1000
+                    self._performance.landmark_age_ms = landmark_age_ms
+                    self._performance.mask_age_ms = mask_age_ms
                     self._performance.motion_factor = motion_factor
+                    self._performance.publish_lag_frames = publish_lag_frames
+                    self._performance.preview_stall_ms = preview_stall_ms
                     self._performance.profile = settings.processing_profile
                     continue
             ok, encoded = cv2.imencode(".jpg", processed, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
             encoded_at = time.perf_counter()
             encode_ms = (encoded_at - processed_at) * 1000
             with self._lock:
+                publish_at = time.perf_counter()
+                publish_interval_ms = (publish_at - self._last_publish_at) * 1000 if self._last_publish_at else 0.0
                 self._latest_processed = processed
                 self._latest_jpeg = encoded.tobytes() if ok else None
-                self._last_publish_at = time.perf_counter()
+                self._last_publish_at = publish_at
                 self._performance.processing_ms = processing_ms
                 self._performance.encode_ms = encode_ms
                 self._performance.effective_fps = 1000 / processing_ms if processing_ms > 0 else 0.0
                 self._performance.frame_age_ms = (time.perf_counter() - packet.captured_at) * 1000
+                self._performance.landmark_age_ms = landmark_age_ms
+                self._performance.mask_age_ms = mask_age_ms
                 self._performance.motion_factor = motion_factor
+                self._performance.publish_interval_ms = publish_interval_ms
+                self._performance.publish_lag_frames = publish_lag_frames
+                self._performance.preview_stall_ms = preview_stall_ms
                 self._performance.published_frame_id = packet.id
                 self._performance.profile = settings.processing_profile
 

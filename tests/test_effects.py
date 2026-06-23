@@ -46,6 +46,7 @@ from purikura_test.effects import (
 class StaticTracker:
     def __init__(self, detections: FaceDetections) -> None:
         self.detections = detections
+        self.last_detection_age_ms = 12.5
 
     def detect(self, frame_bgr: np.ndarray) -> FaceDetections:
         return self.detections
@@ -54,6 +55,7 @@ class StaticTracker:
 class StaticSegmenter:
     def __init__(self, masks: SegmentationMasks) -> None:
         self.masks = masks
+        self.last_mask_age_ms = 45.5
 
     def segment(self, frame_bgr: np.ndarray, detections: FaceDetections) -> SegmentationMasks:
         return self.masks
@@ -191,6 +193,20 @@ def test_effect_pipeline_keeps_shape_with_frame_asset() -> None:
 
     assert result.shape == base.shape
     assert result.dtype == np.uint8
+
+
+def test_effect_pipeline_exposes_analysis_age_metrics() -> None:
+    base = np.full((160, 120, 3), 80, dtype=np.uint8)
+    detections = synthetic_face(base.shape)
+    pipeline = EffectPipeline(
+        tracker=StaticTracker(detections),
+        segmenter=StaticSegmenter(synthetic_masks(base.shape, detections)),
+    )
+
+    pipeline.apply(base, EffectSettings())
+
+    assert pipeline.last_landmark_age_ms == 12.5
+    assert pipeline.last_mask_age_ms == 45.5
 
 
 def test_fast_effect_pipeline_keeps_source_shape_with_frame_asset() -> None:

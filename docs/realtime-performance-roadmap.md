@@ -59,7 +59,7 @@
 - `FramePacket(id, captured_at, frame)` を付与。
 - 加工完了時に `latest_raw_frame_id - packet.id` が閾値を超えていたらpublishしない。
 - Fastは1フレーム超過、Qualityは2フレーム超過を破棄対象にする。
-- `/api/performance` に `discarded_processed_frames`, `frame_age_ms`, `motion_factor`, `published_frame_id`, `latest_raw_frame_id` を返す。
+- `/api/performance` に `discarded_processed_frames`, `frame_age_ms`, `landmark_age_ms`, `mask_age_ms`, `motion_factor`, `publish_interval_ms`, `publish_lag_frames`, `preview_stall_ms`, `published_frame_id`, `latest_raw_frame_id` を返す。
 - Face Landmarkerの検出0件時キャッシュTTLは100ms。
 - Fast previewでは顔ランドマークを毎フレーム更新している。
 - Fast previewではmotionに応じてエフェクト強度を減衰する。
@@ -67,11 +67,11 @@
 - 起動直後のpreviewは `processing_profile="fast"` を初期値にして、最初の表示が重いQuality処理で詰まらないようにしている。
 - `/api/cameras` は現在使用中のカメラを再Openせず、macOS/OpenCVで起動中キャプチャを不安定にしないようにしている。
 - Mac内蔵カメラ向けにread loopを約30fpsへ抑制し、preview publish判定はフレームIDだけでなく経過時間も併用している。一定時間publishが止まった場合は次の加工フレームを通し、静止画化を避ける。
+- UIのPerformanceパネルで処理時間、FPS、表示フレーム年齢、landmark/mask年齢、publish間隔、破棄数を確認できる。
 
 残る課題:
 
 - すでに加工中の重いフレームは最後まで計算されるため、CPU時間は消費する。
-- `landmark_age_ms` と `mask_age_ms` をまだ直接測れていない。
 - Segmenter maskは平行移動のみで、回転、スケール、顔向き変化には弱い。
 - ブラウザ側ではframe idを見て古いフレームを捨てられない。
 - DB metadataには現在、撮影時Quality設定は残るが、preview時のprofileは別フィールドとしては残していない。
@@ -731,12 +731,17 @@ OpenCV/NumPyとの往復転送が増えると逆に遅くなります。
 
 1. `landmark_age_ms`, `mask_age_ms` を追加。
 2. stage別timerを追加。
-3. Debug overlayにage/motionを表示。
+3. PerformanceパネルまたはDebug overlayにage/motionを表示。
 4. benchmark scriptにstage別結果を出す。
 
 受け入れ基準:
 
 - 残像発生時に、古いrawなのか、古いlandmarkなのか、古いmaskなのか判断できる。
+
+現状:
+
+- `landmark_age_ms`, `mask_age_ms`, `publish_interval_ms`, `publish_lag_frames`, `preview_stall_ms` は `/api/performance` とUIのPerformanceパネルで確認できる。
+- stage別timerとbenchmark scriptへの詳細traceは未実装。
 
 ### Step 2: preview/capture分離
 
@@ -825,10 +830,11 @@ class PerformanceSummary(BaseModel):
     landmark_age_ms: float
     mask_age_ms: float
     motion_factor: float
+    publish_interval_ms: float
+    publish_lag_frames: int
+    preview_stall_ms: float
     published_frame_id: int
     latest_raw_frame_id: int
-    landmark_frame_id: int
-    mask_frame_id: int
     profile: Literal["quality", "fast"]
 ```
 
@@ -920,7 +926,7 @@ uv run python scripts/benchmark_pipeline.py --profile fast --trace-stages --simu
 
 次にやるべき順番は、native化やONNX化ではなく、以下です。
 
-1. `landmark_age_ms` / `mask_age_ms` を計測してDebug overlayに出す。
+1. `landmark_age_ms` / `mask_age_ms` を計測してUIに出す。
 2. previewとcaptureを分離し、previewは低遅延、captureはQualityにする。
 3. motionが大きい時は古い加工結果をpublishせず、segmentation由来補正をさらに弱める。
 4. Capture/Analyze/Render/Publishを分け、各段をlatest-onlyにする。

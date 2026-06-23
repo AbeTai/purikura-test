@@ -210,8 +210,14 @@ class MediaPipeFaceTracker:
         self._landmarker = vision.FaceLandmarker.create_from_options(options)
         self._last_timestamp_ms = 0
         self._last_detection_at = 0.0
+        self._last_detection_perf = 0.0
+        self._last_detection_age_ms = 0.0
         self._last_detections = FaceDetections(faces=())
         self._max_cached_seconds = max_cached_seconds
+
+    @property
+    def last_detection_age_ms(self) -> float:
+        return self._last_detection_age_ms
 
     def detect(self, frame_bgr: np.ndarray) -> FaceDetections:
         timestamp_ms = max(int(time.monotonic() * 1000), self._last_timestamp_ms + 1)
@@ -220,6 +226,7 @@ class MediaPipeFaceTracker:
         rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
         mp_image = self._mp.Image(image_format=self._mp.ImageFormat.SRGB, data=np.ascontiguousarray(rgb))
         result = self._landmarker.detect_for_video(mp_image, timestamp_ms)
+        detect_finished = time.perf_counter()
         faces = tuple(
             face_geometry_from_normalized_landmarks(face_landmarks, frame_bgr.shape)
             for face_landmarks in result.face_landmarks
@@ -227,9 +234,15 @@ class MediaPipeFaceTracker:
         if faces:
             self._last_detections = FaceDetections(faces=faces)
             self._last_detection_at = time.monotonic()
+            self._last_detection_perf = detect_finished
+            self._last_detection_age_ms = 0.0
             return self._last_detections
         if time.monotonic() - self._last_detection_at <= self._max_cached_seconds:
+            self._last_detection_age_ms = (
+                (time.perf_counter() - self._last_detection_perf) * 1000 if self._last_detection_perf else 0.0
+            )
             return self._last_detections
+        self._last_detection_age_ms = 0.0
         return FaceDetections(faces=())
 
 
@@ -273,6 +286,12 @@ class HeadSegmenter:
         self._last_masks: SegmentationMasks | None = None
         self._last_detection_center: tuple[float, float] | None = None
         self._last_detection_width: float | None = None
+        self._last_segmented_perf = 0.0
+        self._last_mask_age_ms = 0.0
+
+    @property
+    def last_mask_age_ms(self) -> float:
+        return self._last_mask_age_ms
 
     def segment(self, frame_bgr: np.ndarray, detections: FaceDetections) -> SegmentationMasks:
         self._frame_index += 1
@@ -289,6 +308,9 @@ class HeadSegmenter:
             shifted_masks = self._with_current_protection(shifted_masks, frame_bgr.shape, detections)
             self._last_masks = shifted_masks
             self._last_detection_center, self._last_detection_width = primary_face_motion_reference(detections)
+            self._last_mask_age_ms = (
+                (time.perf_counter() - self._last_segmented_perf) * 1000 if self._last_segmented_perf else 0.0
+            )
             return shifted_masks
 
         timestamp_ms = max(int(time.monotonic() * 1000), self._last_timestamp_ms + 1)
@@ -303,6 +325,8 @@ class HeadSegmenter:
             new_masks = ema_masks(previous_masks, new_masks, self._ema_alpha)
             new_masks = self._with_current_protection(new_masks, frame_bgr.shape, detections)
         self._last_masks = new_masks
+        self._last_segmented_perf = time.perf_counter()
+        self._last_mask_age_ms = 0.0
         self._last_detection_center, self._last_detection_width = primary_face_motion_reference(detections)
         return new_masks
 
@@ -344,6 +368,16 @@ class QualityEffectPipeline:
     ) -> None:
         self.tracker = tracker or detector or MediaPipeFaceTracker()
         self.segmenter = segmenter or HeadSegmenter()
+        self._last_landmark_age_ms = 0.0
+        self._last_mask_age_ms = 0.0
+
+    @property
+    def last_landmark_age_ms(self) -> float:
+        return self._last_landmark_age_ms
+
+    @property
+    def last_mask_age_ms(self) -> float:
+        return self._last_mask_age_ms
 
     def apply(
         self,
@@ -353,6 +387,8 @@ class QualityEffectPipeline:
     ) -> np.ndarray:
         detections = self.tracker.detect(frame_bgr)
         masks = self.segmenter.segment(frame_bgr, detections)
+        self._last_landmark_age_ms = float(getattr(self.tracker, "last_detection_age_ms", 0.0))
+        self._last_mask_age_ms = float(getattr(self.segmenter, "last_mask_age_ms", 0.0))
         adjusted = frame_bgr.copy()
         profile_strength = settings.purikura_intensity * (1.0 + settings.doll_intensity * 0.18)
         adjusted = self._apply_face_slim(adjusted, detections, settings.face_slim * profile_strength)
@@ -515,12 +551,27 @@ class CachedFaceTracker:
         self._detect_every_n_frames = max(1, detect_every_n_frames)
         self._frame_index = 0
         self._last_detections = FaceDetections(faces=())
+        self._last_detect_call_perf = 0.0
+        self._last_detection_age_at_call_ms = 0.0
+        self._last_detection_age_ms = 0.0
+
+    @property
+    def last_detection_age_ms(self) -> float:
+        return self._last_detection_age_ms
 
     def detect(self, frame_bgr: np.ndarray) -> FaceDetections:
         self._frame_index += 1
         if self._last_detections.faces and (self._frame_index - 1) % self._detect_every_n_frames != 0:
+            self._last_detection_age_ms = (
+                self._last_detection_age_at_call_ms + (time.perf_counter() - self._last_detect_call_perf) * 1000
+                if self._last_detect_call_perf
+                else 0.0
+            )
             return self._last_detections
         self._last_detections = self._tracker.detect(frame_bgr)
+        self._last_detect_call_perf = time.perf_counter()
+        self._last_detection_age_at_call_ms = float(getattr(self._tracker, "last_detection_age_ms", 0.0))
+        self._last_detection_age_ms = self._last_detection_age_at_call_ms
         return self._last_detections
 
 
@@ -542,10 +593,20 @@ class FastEffectPipeline:
         self._last_detection_center: tuple[float, float] | None = None
         self._last_detection_width: float | None = None
         self._last_motion_ratio = 0.0
+        self._last_landmark_age_ms = 0.0
+        self._last_mask_age_ms = 0.0
 
     @property
     def last_motion_ratio(self) -> float:
         return self._last_motion_ratio
+
+    @property
+    def last_landmark_age_ms(self) -> float:
+        return self._last_landmark_age_ms
+
+    @property
+    def last_mask_age_ms(self) -> float:
+        return self._last_mask_age_ms
 
     def apply(
         self,
@@ -564,6 +625,8 @@ class FastEffectPipeline:
         motion_scale = motion_preview_scale(motion_ratio)
         preview_settings = attenuate_settings_for_motion(settings, motion_scale)
         masks = self.segmenter.segment(working, detections)
+        self._last_landmark_age_ms = float(getattr(self.tracker, "last_detection_age_ms", 0.0))
+        self._last_mask_age_ms = float(getattr(self.segmenter, "last_mask_age_ms", 0.0))
 
         adjusted = working.copy()
         profile_strength = preview_settings.purikura_intensity * (1.0 + preview_settings.doll_intensity * 0.14)
@@ -684,10 +747,20 @@ class EffectPipeline:
         self._quality: QualityEffectPipeline | None = None
         self._fast: FastEffectPipeline | None = None
         self._last_motion_ratio = 0.0
+        self._last_landmark_age_ms = 0.0
+        self._last_mask_age_ms = 0.0
 
     @property
     def last_motion_ratio(self) -> float:
         return self._last_motion_ratio
+
+    @property
+    def last_landmark_age_ms(self) -> float:
+        return self._last_landmark_age_ms
+
+    @property
+    def last_mask_age_ms(self) -> float:
+        return self._last_mask_age_ms
 
     def apply(
         self,
@@ -699,9 +772,15 @@ class EffectPipeline:
             pipeline = self._ensure_fast()
             result = pipeline.apply(frame_bgr, settings, frame_asset)
             self._last_motion_ratio = pipeline.last_motion_ratio
+            self._last_landmark_age_ms = pipeline.last_landmark_age_ms
+            self._last_mask_age_ms = pipeline.last_mask_age_ms
             return result
         self._last_motion_ratio = 0.0
-        return self._ensure_quality().apply(frame_bgr, settings, frame_asset)
+        pipeline = self._ensure_quality()
+        result = pipeline.apply(frame_bgr, settings, frame_asset)
+        self._last_landmark_age_ms = pipeline.last_landmark_age_ms
+        self._last_mask_age_ms = pipeline.last_mask_age_ms
+        return result
 
     def _ensure_quality(self) -> QualityEffectPipeline:
         if self._quality is None:
